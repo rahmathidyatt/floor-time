@@ -78,3 +78,8 @@ Aplikasi menyediakan 3 output utama:
 Aktifkan opsi **Gunakan kode audit** bila ingin hasil generate bisa diulang dengan input yang sama. Matikan opsi tersebut bila ingin hasil random berubah setiap kali generate.
 
 Jika ingin mengubah bentuk poster, pilih **Portrait** atau **Landscape** di sidebar sebelum menekan tombol Generate.
+
+
+## Catatan deploy Streamlit
+
+Versi ini memakai pencarian font sistem yang lebih luas agar tampilan poster tetap normal saat dijalankan di Streamlit Community Cloud.

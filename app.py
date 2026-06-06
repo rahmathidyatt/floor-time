@@ -29,6 +29,7 @@ from __future__ import annotations
 import calendar
 import html
 import io
+import os
 import random
 import re
 import zipfile
@@ -1145,32 +1146,127 @@ def build_excel_file(
 # OUTPUT GAMBAR PNG DAN PDF
 # -----------------------------------------------------------------------------
 
-def find_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    """Mencari font sistem yang umum tersedia.
+_FONT_PATH_CACHE: Dict[bool, Optional[str]] = {True: None, False: None}
 
-    Font tidak disertakan ke paket aplikasi. Aplikasi hanya memakai font yang
-    sudah tersedia pada komputer/server tempat aplikasi dijalankan. Bila font
-    utama tidak ada, Pillow akan memakai font default agar aplikasi tetap hidup.
+
+def _try_font(path_or_name: str, size: int) -> Optional[ImageFont.FreeTypeFont]:
+    """Mencoba membuka font TrueType/OpenType dengan aman."""
+    try:
+        return ImageFont.truetype(path_or_name, size=size)
+    except Exception:
+        return None
+
+
+def _discover_system_font(bold: bool) -> Optional[str]:
+    """Mencari font yang tersedia pada Windows, Linux, dan Streamlit Cloud.
+
+    Masalah yang sering terjadi di server deploy adalah path font berbeda dengan
+    laptop lokal. Jika Pillow memakai font default bawaan, teks menjadi sangat
+    kecil dan poster terlihat rusak. Fungsi ini melakukan pencarian font sistem
+    secara lebih luas agar output tetap konsisten di Streamlit Community Cloud.
     """
-    candidates = []
-    if bold:
-        candidates = [
+    if _FONT_PATH_CACHE.get(bold):
+        return _FONT_PATH_CACHE[bold]
+
+    preferred_keywords = (
+        [
+            "dejavusans-bold", "liberationsans-bold", "arialbd", "arial-bold",
+            "notosans-bold", "freesansbold", "roboto-bold", "opensans-bold",
+        ]
+        if bold
+        else [
+            "dejavusans", "liberationsans-regular", "arial", "notosans-regular",
+            "freesans", "roboto-regular", "opensans-regular",
+        ]
+    )
+
+    search_roots = [
+        "/usr/share/fonts",
+        "/usr/local/share/fonts",
+        "/app/.fonts",
+        os.path.expanduser("~/.fonts"),
+        os.path.expanduser("~/.local/share/fonts"),
+        "C:/Windows/Fonts",
+    ]
+
+    discovered_files: List[str] = []
+    for root in search_roots:
+        if not root or not os.path.isdir(root):
+            continue
+        for current_root, _, files in os.walk(root):
+            for filename in files:
+                if filename.lower().endswith((".ttf", ".otf")):
+                    discovered_files.append(os.path.join(current_root, filename))
+
+    # Prioritaskan font yang paling mirip Arial/DejaVu/Liberation agar tampilan
+    # tetap tebal, bersih, dan dekat dengan desain Brighton.
+    for keyword in preferred_keywords:
+        for font_path in discovered_files:
+            compact_name = os.path.basename(font_path).lower().replace(" ", "").replace("_", "")
+            if keyword.replace(" ", "").replace("_", "") in compact_name:
+                _FONT_PATH_CACHE[bold] = font_path
+                return font_path
+
+    # Fallback terakhir: ambil font sans/regular yang tersedia, bukan bitmap
+    # default Pillow, supaya ukuran teks tetap mengikuti parameter size.
+    fallback_keywords = ["sans", "arial", "liberation", "dejavu", "noto", "free", "roboto"]
+    for keyword in fallback_keywords:
+        for font_path in discovered_files:
+            compact_name = os.path.basename(font_path).lower()
+            if keyword in compact_name:
+                _FONT_PATH_CACHE[bold] = font_path
+                return font_path
+
+    return None
+
+
+def find_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """Mencari font sistem yang umum tersedia dengan fallback aman untuk deploy.
+
+    Font tidak disertakan ke paket aplikasi. Aplikasi memakai font sistem yang
+    tersedia pada komputer/server. Pencarian dibuat luas agar di Streamlit Cloud
+    teks tidak jatuh ke font bitmap kecil bawaan Pillow.
+    """
+    size = max(8, int(round(size)))
+
+    direct_candidates = (
+        [
+            "DejaVuSans-Bold.ttf",
+            "LiberationSans-Bold.ttf",
+            "Arial Bold.ttf",
+            "Arial-Bold.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
             "C:/Windows/Fonts/arialbd.ttf",
         ]
-    else:
-        candidates = [
+        if bold
+        else [
+            "DejaVuSans.ttf",
+            "LiberationSans-Regular.ttf",
+            "Arial.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
             "C:/Windows/Fonts/arial.ttf",
         ]
+    )
 
-    for path in candidates:
-        try:
-            return ImageFont.truetype(path, size=size)
-        except Exception:
-            continue
+    for candidate in direct_candidates:
+        font = _try_font(candidate, size)
+        if font is not None:
+            return font
+
+    discovered_path = _discover_system_font(bold=bold)
+    if discovered_path:
+        font = _try_font(discovered_path, size)
+        if font is not None:
+            return font
+
+    # Jika server benar-benar tidak memiliki font TTF/OTF, gunakan default agar
+    # aplikasi tidak crash. Namun kondisi ini jarang terjadi setelah pencarian luas.
     return ImageFont.load_default()
 
 
