@@ -1117,20 +1117,22 @@ def build_excel_file(
 
 
     # Sheet data mentah untuk arsip atau olah ulang.
+    # Kolom status request khusus tidak ikut diekspor agar output tetap bersih.
     ws_detail = wb.create_sheet(title="Data Detail")
-    if assignments_df.empty:
+    detail_export_df = assignments_df.drop(columns=["Urgent"], errors="ignore")
+    if detail_export_df.empty:
         ws_detail["A1"] = "Belum ada data."
     else:
-        for col_idx, col_name in enumerate(assignments_df.columns, start=1):
+        for col_idx, col_name in enumerate(detail_export_df.columns, start=1):
             cell = ws_detail.cell(row=1, column=col_idx, value=col_name)
             cell.font = Font(bold=True)
             cell.fill = PatternFill("solid", fgColor=gray)
             cell.border = border
-        for row_idx, row in enumerate(assignments_df.itertuples(index=False), start=2):
+        for row_idx, row in enumerate(detail_export_df.itertuples(index=False), start=2):
             for col_idx, value in enumerate(row, start=1):
                 cell = ws_detail.cell(row=row_idx, column=col_idx, value=value)
                 cell.border = border
-        for col_idx in range(1, len(assignments_df.columns) + 1):
+        for col_idx in range(1, len(detail_export_df.columns) + 1):
             ws_detail.column_dimensions[get_column_letter(col_idx)].width = 18
 
 
@@ -1277,8 +1279,10 @@ def compute_image_layout(
 ) -> Dict[str, int]:
     """Menghitung layout responsif agar poster tetap rapi walau agen banyak.
 
-    Seluruh ukuran dirender pada skala tinggi agar output PNG/PDF tajam saat
-    diunduh, tetapi tetap proporsional ketika dipreview di Streamlit.
+    Perbaikan penting:
+    - Landscape memakai mode compact agar 6 hari kerja dengan ±37 agen tetap muat.
+    - Font, ikon, garis, dan seluruh koordinat tetap diskalakan bersama agar PNG/PDF HD.
+    - Area catatan selalu disediakan dari awal sehingga tidak menimpa jadwal Sabtu.
     """
     scale = EXPORT_RENDER_SCALE
     base_width, base_height = get_canvas_size(orientation)
@@ -1288,42 +1292,76 @@ def compute_image_layout(
     def px(value: int) -> int:
         return int(round(value * scale))
 
-    margin_x = px(44 if is_landscape else 54)
-    brand_h = px(92 if is_landscape else 100)
-    title_h = px(112 if is_landscape else 128)
-    notes_h = px(90 if is_landscape else 118)
-    footer_h = px(34 if is_landscape else 36)
-    body_top = brand_h + title_h + px(18)
-    note_badge_reserved_h = px(50)
+    if is_landscape:
+        # Mode compact khusus landscape. Tanpa ini, minggu penuh Senin-Sabtu
+        # dengan agen 35+ akan terlihat terlalu renggang atau catatan menimpa Sabtu.
+        margin_x = px(44)
+        brand_h = px(72)
+        title_h = px(122)
+        notes_h = px(70)
+        footer_h = px(16)
+        body_top = brand_h + title_h + px(12)
+        note_badge_reserved_h = px(34)
+        header_h = px(42)
+        row_h = px(25)
+        gap_h = px(7)
+        agent_font_size = px(17)
+        time_font_size = px(14)
+        col_gap = px(34)
+        time_w = px(170)
+        day_badge_w = px(190)
+        day_badge_h = px(40)
+    else:
+        margin_x = px(54)
+        brand_h = px(100)
+        title_h = px(128)
+        notes_h = px(118)
+        footer_h = px(18)
+        body_top = brand_h + title_h + px(18)
+        note_badge_reserved_h = px(50)
+        header_h = px(58)
+        row_h = px(32)
+        gap_h = px(16)
+        agent_font_size = px(24)
+        time_font_size = px(22)
+        col_gap = px(28)
+        time_w = px(202)
+        day_badge_w = px(192)
+        day_badge_h = px(56)
+
     body_bottom = height - notes_h - footer_h - px(24) - note_badge_reserved_h
     available_body_h = max(px(420), body_bottom - body_top)
 
     day_data = collect_day_data(slots, schedule_for_week)
-    header_h = px(55 if is_landscape else 58)
-    row_h = px(33 if is_landscape else 32)
-    gap_h = px(14 if is_landscape else 16)
-    agent_font_size = px(27 if is_landscape else 24)
-    time_font_size = px(23 if is_landscape else 22)
 
-    def required_height(candidate_row_h: int) -> int:
+    def required_height(candidate_row_h: int, candidate_gap_h: int) -> int:
         total = 0
         for _, _, max_agents in day_data:
-            total += header_h + px(8) + max(candidate_row_h * max_agents + px(8), candidate_row_h + px(8)) + gap_h
+            total += header_h + px(8) + max(candidate_row_h * max_agents + px(8), candidate_row_h + px(8)) + candidate_gap_h
         return total
 
-    while required_height(row_h) > available_body_h and row_h > px(22):
+    min_row_h = px(19 if is_landscape else 22)
+    min_agent_font = px(13 if is_landscape else 15)
+    min_time_font = px(12 if is_landscape else 14)
+    while required_height(row_h, gap_h) > available_body_h and row_h > min_row_h:
         row_h -= scale
-        agent_font_size = max(px(15), agent_font_size - scale)
-        time_font_size = max(px(14), time_font_size - scale)
+        agent_font_size = max(min_agent_font, agent_font_size - scale)
+        time_font_size = max(min_time_font, time_font_size - scale)
 
-    while required_height(row_h) > available_body_h and gap_h > px(6):
+    min_gap_h = px(4 if is_landscape else 6)
+    while required_height(row_h, gap_h) > available_body_h and gap_h > min_gap_h:
         gap_h -= scale
 
-    col_gap = px(40 if is_landscape else 28)
+    # Cadangan terakhir: landscape yang sangat penuh tetap dibuat aman dengan
+    # mengurangi tinggi notes, bukan menimpa jadwal.
+    while required_height(row_h, gap_h) > available_body_h and notes_h > px(52):
+        notes_h -= px(4)
+        body_bottom = height - notes_h - footer_h - px(20) - note_badge_reserved_h
+        available_body_h = max(px(420), body_bottom - body_top)
+
     shift_area_x = margin_x
     shift_area_w = width - 2 * margin_x
     col_w = (shift_area_w - col_gap) // 2
-    time_w = px(220 if is_landscape else 202)
 
     return {
         "width": width,
@@ -1345,8 +1383,8 @@ def compute_image_layout(
         "shift_area_w": shift_area_w,
         "col_w": col_w,
         "time_w": time_w,
-        "day_badge_w": px(210 if is_landscape else 192),
-        "day_badge_h": px(52 if is_landscape else 56),
+        "day_badge_w": day_badge_w,
+        "day_badge_h": day_badge_h,
         "scale": scale,
     }
 
@@ -1396,7 +1434,7 @@ def draw_shift_column(
     if not agents:
         agents = [("", False)]
 
-    for idx, (agent, is_urgent) in enumerate(agents):
+    for idx, (agent, _is_urgent) in enumerate(agents):
         row_y = y + idx * row_h
         baseline = row_y + row_h - 2 * scale
         bullet_cy = row_y + row_h // 2
@@ -1661,15 +1699,16 @@ def inject_app_style() -> None:
             }
             .app-credit {
                 text-align: center;
-                margin: 22px 0 8px 0;
+                margin: 10px 0 4px 0;
                 padding: 0;
                 font-size: 13px;
                 font-weight: 600;
                 color: #666666;
                 letter-spacing: .2px;
+                line-height: 1.2;
             }
             .block-container {
-                padding-bottom: 1.6rem !important;
+                padding-bottom: 0.6rem !important;
             }
             .brand-o-white {
                 color: #ffffff;
@@ -1692,10 +1731,10 @@ def inject_app_style() -> None:
 
 
 def render_app_credit() -> None:
-    """Menampilkan credit kecil di bagian bawah tab aplikasi.
+    """Menampilkan credit kecil di aplikasi.
 
     Credit hanya tampil di aplikasi, tidak ikut masuk ke output Excel, PNG, atau PDF.
-    Posisi dibuat dekat dengan konten terakhir agar tidak menyisakan ruang kosong berlebih.
+    Jaraknya dibuat rapat dan natural seperti footer aplikasi profesional.
     """
     st.markdown('<div class="app-credit">Created by rh</div>', unsafe_allow_html=True)
 
@@ -1823,8 +1862,8 @@ ANNA (NKRL)"""
             selected_closed_labels = st.multiselect("Pilih tanggal libur", options=date_labels)
             closed_dates = [label_to_date[label] for label in selected_closed_labels]
 
-            st.subheader("Request Urgent Agen")
-            st.caption("Gunakan hanya untuk kondisi penting. Agen tetap hanya boleh 1 jadwal per minggu.")
+            st.subheader("Request Jadwal Khusus Internal")
+            st.caption("Gunakan hanya untuk kondisi penting. Informasi ini hanya untuk admin dan tidak tampil pada jadwal publik.")
             urgent_template = pd.DataFrame(columns=["Agen", "Tanggal", "Shift", "Catatan"])
             urgent_df = st.data_editor(
                 urgent_template,
@@ -1936,8 +1975,8 @@ Penanganan klien berdasarkan agen yang melakukan absensi pertama."""
             metric_cols[0].metric("Agen", total_agents_in_first_week)
             metric_cols[1].metric("Minggu", len(weeks_state))
             metric_cols[2].metric("Total Baris Jadwal", len(assignments_df))
-            urgent_count = int((assignments_df["Urgent"] == "Ya").sum()) if not assignments_df.empty else 0
-            metric_cols[3].metric("Request Urgent Masuk", urgent_count)
+            active_slot_count = sum(len(slots) for slots in slots_by_week.values()) if slots_by_week else 0
+            metric_cols[3].metric("Slot Aktif", active_slot_count)
 
             validation_ok = st.session_state.get("validation_ok", False)
             validation_messages = st.session_state.get("validation_messages", [])
@@ -1952,7 +1991,8 @@ Penanganan klien berdasarkan agen yang melakukan absensi pertama."""
 
             if not assignments_df.empty:
                 with st.expander("Lihat data detail jadwal"):
-                    st.dataframe(assignments_df, use_container_width=True, hide_index=True)
+                    detail_preview_df = assignments_df.drop(columns=["Urgent"], errors="ignore")
+                    st.dataframe(detail_preview_df, use_container_width=True, hide_index=True)
 
             week_numbers = list(weeks_state.keys())
             if week_numbers:
@@ -2022,7 +2062,7 @@ Penanganan klien berdasarkan agen yang melakukan absensi pertama."""
             1. Pilih bulan dan tahun jadwal.
             2. Masukkan daftar agen yang berhak mendapatkan jadwal floor time.
             3. Pilih tanggal merah atau tanggal kantor tutup.
-            4. Masukkan request urgent bila ada. Gunakan seperlunya agar hasil tetap adil.
+            4. Masukkan request jadwal khusus bila ada. Gunakan seperlunya agar hasil tetap adil.
             5. Klik **Generate Jadwal Bulanan**.
             6. Cek tab **Hasil Jadwal**. Pastikan validasi anti-double berhasil.
             7. Download Excel untuk arsip, PNG untuk gambar, dan PDF untuk cetak.
@@ -2031,7 +2071,7 @@ Penanganan klien berdasarkan agen yang melakukan absensi pertama."""
 
             - Setiap agen hanya mendapat 1 jadwal dalam 1 minggu aktif.
             - Tanggal merah tidak akan diberikan jadwal.
-            - Request urgent diprioritaskan, tetapi tetap tidak boleh membuat agen double dalam minggu yang sama.
+            - Request jadwal khusus diprioritaskan secara internal, tetapi tidak diberi label pada jadwal publik.
             - Bila jumlah agen lebih banyak dari kapasitas shift, aplikasi dapat menaikkan kapasitas otomatis.
             - Minggu terakhir otomatis diteruskan sampai Sabtu walaupun tanggalnya masuk bulan berikutnya.
 
