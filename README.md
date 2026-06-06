@@ -83,3 +83,10 @@ Jika ingin mengubah bentuk poster, pilih **Portrait** atau **Landscape** di side
 ## Catatan deploy Streamlit
 
 Versi ini memakai pencarian font sistem yang lebih luas agar tampilan poster tetap normal saat dijalankan di Streamlit Community Cloud.
+
+
+## Catatan Revisi Final V7
+
+Versi ini memperbaiki fallback font pada Streamlit Cloud. Jika server tidak
+menemukan font TTF/OTF sistem, aplikasi tetap memakai fallback font scalable
+agar hasil poster tidak berubah menjadi tulisan kecil saat deploy.

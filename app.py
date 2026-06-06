@@ -1265,9 +1265,15 @@ def find_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFo
         if font is not None:
             return font
 
-    # Jika server benar-benar tidak memiliki font TTF/OTF, gunakan default agar
-    # aplikasi tidak crash. Namun kondisi ini jarang terjadi setelah pencarian luas.
-    return ImageFont.load_default()
+    # Fallback darurat untuk Streamlit Cloud:
+    # beberapa environment minimal bisa gagal menemukan file TTF/OTF sistem.
+    # ImageFont.load_default(size=...) tetap menghasilkan font scalable pada
+    # Pillow versi modern. Ini mencegah teks jatuh ke bitmap kecil yang membuat
+    # poster terlihat rusak/kecil setelah deploy.
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
 
 
 def text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> Tuple[int, int]:
