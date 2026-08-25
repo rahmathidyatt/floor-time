@@ -1,6 +1,6 @@
 """
 Floor Time Schedule Generator untuk Brighton Real Estate
-========================================================
+=========================================================
 
 Aplikasi ini dibuat untuk membantu Staff Operasional membuat jadwal Floor Time
 per bulan, lalu memecahnya menjadi jadwal per minggu yang rapi, adil, dan bisa
