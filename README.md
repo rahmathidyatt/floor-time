@@ -80,8 +80,4 @@ Aktifkan opsi **Gunakan kode audit** bila ingin hasil generate bisa diulang deng
 Jika ingin mengubah bentuk poster, pilih **Portrait** atau **Landscape** di sidebar sebelum menekan tombol Generate.
 
 
-## Catatan deploy Streamlit
-
-Versi ini memakai pencarian font sistem yang lebih luas agar tampilan poster tetap normal saat dijalankan di Streamlit Community Cloud.
-
 
