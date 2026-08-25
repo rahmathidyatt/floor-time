@@ -68,11 +68,6 @@ Aplikasi menyediakan 3 output utama:
 2. **Gambar PNG** dalam bentuk ZIP karena setiap minggu dibuat menjadi poster terpisah.
 3. **PDF** multi-page yang berisi seluruh poster mingguan.
 
-## Catatan Tampilan
-
-- Logo Brighton pada poster menggunakan huruf **O** berwarna putih.
-- Credit **Created by rh** hanya tampil di halaman aplikasi bagian bawah tengah, bukan pada output Excel, PNG, maupun PDF.
-
 ## Catatan Operasional
 
 Aktifkan opsi **Gunakan kode audit** bila ingin hasil generate bisa diulang dengan input yang sama. Matikan opsi tersebut bila ingin hasil random berubah setiap kali generate.
