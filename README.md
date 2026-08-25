@@ -1,50 +1,102 @@
-# Brighton Floor Time Schedule Generator
+# Brighton Floor Time Scheduler
 
-Aplikasi web berbasis Python Streamlit untuk membantu Staff Operasional Brighton membuat jadwal Floor Time bulanan secara fleksibel, rapi, tervalidasi, dan siap dipakai untuk kebutuhan operasional.
+Aplikasi internal berbasis **Python + Streamlit** untuk menyiapkan data agent bulan sebelumnya, membuat jadwal Floor Time bulanan secara adil, menangani tanggal merah dengan keterangan hari libur, memvalidasi hasil, dan mengekspor poster mingguan ke Excel, PNG, dan PDF.
 
-## Fitur Utama
+## Pembaruan utama
 
-- Input daftar agen fleksibel, jumlah agen bisa berubah setiap bulan.
-- Generate jadwal per bulan dan otomatis dikelompokkan menjadi jadwal mingguan.
-- Minggu terakhir otomatis diteruskan sampai hari Sabtu walaupun masuk bulan berikutnya, sehingga tidak ada jadwal yang menggantung hanya 1-2 hari.
-- Pilih tanggal merah atau tanggal kantor tutup sebelum jadwal digenerate.
-- Setiap agen hanya mendapat 1 jadwal per minggu.
-- Randomisasi menyeluruh dengan opsi kode audit agar hasil bisa diulang bila diperlukan.
-- Request urgent agen untuk tanggal dan shift tertentu.
-- Pilihan orientasi poster: Portrait atau Landscape.
-- Preview poster mingguan berupa gambar stabil, bukan HTML/CSS yang mudah berubah di browser.
-- Export hanya dalam format Excel, gambar PNG, dan PDF.
+- Desain poster baru mengikuti gaya Brighton yang lebih clean, formal, dan corporate.
+- Poster **tidak menampilkan Minggu 1/2/3/4/5/6**; hanya rentang tanggal.
+- Icon kalender berulang pada setiap hari dihilangkan.
+- Hari libur memakai aksen merah dan dapat diberi nama, misalnya `Maulid Nabi Muhammad SAW`.
+- Hari libur tidak memiliki shift dan tidak memiliki agent.
+- Data agent dibaca dari Excel/CSV dengan format utama `Nama`, `Jabatan`, `Office`, dan `Total`; kolom `Office` otomatis diringkas menjadi **Unit** dari kata kedua (contoh `Brighton Priority Cibubur, Bogor` → `Priority`).
+- Tersedia filter **Minimum Total Kehadiran**; default 5 sehingga kehadiran 1–4 tidak masuk kandidat jadwal.
+- Agen yang lolos filter dapat dikeluarkan khusus untuk bulan berjalan dengan menghilangkan centang **Masuk Jadwal**.
+- Bulan referensi otomatis adalah bulan sebelum bulan jadwal, termasuk Desember → Januari.
+- Batas Floor Time per agent per minggu dapat dipilih **1x, 2x, atau 3x**.
+- Agent boleh muncul beberapa kali dalam seminggu pada **hari yang berbeda**, tetapi tidak pernah dua kali pada tanggal yang sama.
+- Algoritma mengutamakan pemerataan total assignment, rotasi shift, jarak hari, dan keragaman Business Unit.
+- Bila agent sedikit, sistem dapat mengulang agent sesuai batas mingguan; bila kapasitas tidak cukup, slot tetap tidak dipaksa dengan duplikasi ilegal. Notifikasi kapasitas massal tidak ditampilkan di UI agar tetap clean.
+- Tab **Jadwal** menampilkan daftar bulanan berjudul `FLOOR TIME [BULAN]` sebelum poster mingguan. Kolom **Nama / Jabatan / Unit / Total Kehadiran** dapat dipilih dan Total Kehadiran dapat diurutkan default, terbesar→terkecil, atau terkecil→terbesar.
+- Poster memakai ukuran font stabil. Jika agent banyak, tinggi card dan canvas bertambah ke bawah.
+- Jika satu shift sangat padat, daftar agent otomatis dapat dibagi menjadi dua kolom tanpa mengecilkan font.
+- Cross-month week didukung, misalnya `31 Agustus 2026 - 05 September 2026`.
+- Export tersedia dalam Excel, ZIP PNG, dan PDF multi-page.
+- Perubahan konfigurasi setelah generate akan menonaktifkan hasil lama agar tidak menampilkan schedule stale.
 
-## Cara Instalasi
+## Menjalankan aplikasi
 
-Pastikan Python sudah terinstall. Disarankan Python 3.10 atau lebih baru.
+Disarankan Python 3.10 atau lebih baru.
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
 ```
 
-## Cara Menjalankan
+Perintah `python -m streamlit` direkomendasikan khususnya pada Windows karena beberapa konfigurasi Application Control memblokir launcher `streamlit.exe` walaupun modul Streamlit sendiri dapat dijalankan.
 
-```bash
-streamlit run app.py
-```
-
-Setelah itu browser akan membuka aplikasi secara otomatis. Bila tidak terbuka, lihat URL yang muncul di terminal, biasanya:
+Browser biasanya membuka:
 
 ```text
 http://localhost:8501
 ```
 
-## Format Input Agen
+## Perbaikan kompatibilitas tampilan Windows
 
-Masukkan satu agen per baris, contoh:
+Versi ini memaksa theme Streamlit **light** melalui `.streamlit/config.toml` agar teks widget tidak lagi berwarna terang di atas background putih. Renderer PNG/PDF juga mencari font scalable secara cross-platform (Segoe UI/Arial/Aptos pada Windows, serta fallback macOS/Linux) sehingga export tidak jatuh ke bitmap font kecil. Tidak ada file font yang dibundel di project.
 
-```text
-PAULA (DUCC)
-AZWAR (IBEX)
-MONIKA (NDEP)
+## Format data agent
+
+Data utama dimasukkan melalui upload CSV/Excel. Format yang direkomendasikan:
+
+| No | Nama | Jabatan | Office | Total |
+|---:|---|---|---|---:|
+| 1 | TONI (ACYS) | Business Manager | Brighton Priority Cibubur, Bogor | 13 |
+| 2 | VIRA (AUTU) | Business Manager | Brighton Warrior Cibubur, Bogor | 9 |
+
+- `No` opsional dan akan diabaikan oleh sistem.
+- `Nama` wajib. Format `NAMA (KODE)` otomatis memisahkan nama dan kode agent.
+- `Jabatan` menjadi informasi profil agent.
+- `Office` tetap dibaca dari file sumber, tetapi tampilan **Unit** mengambil kata kedua dari nilai Office, misalnya `Brighton Champion Cibubur, Bogor` menjadi `Champion`.
+- `Total` dibaca sebagai total kehadiran bulan sebelumnya.
+- Alias format lama seperti `Agent`, `Kehadiran`, dan `Business Unit` tetap dibaca untuk backward compatibility.
+
+Setelah upload, tentukan **Minimum Total Kehadiran** lalu gunakan kolom **Masuk Jadwal** untuk memilih agen aktif. **Total Agen Bertugas** selalu mengikuti hasil filter dan pilihan tersebut.
+
+## Hari libur
+
+Pada tab **Konfigurasi & Generate**:
+
+1. Pilih tanggal libur.
+2. Isi nama hari libur.
+3. Generate jadwal.
+
+Output hanya menampilkan hari/tanggal dan nama peringatan dengan warna merah. Tidak ada icon X dan tidak ada tulisan besar `TUTUP` atau `KANTOR TUTUP`.
+
+## Aturan scheduling
+
+- Hari kerja default: Senin–Sabtu.
+- Senin–Jumat:
+  - 08.00–12.30
+  - 12.30–17.00
+- Sabtu:
+  - 08.00–11.30
+  - 11.30–15.00
+- Agent tidak boleh muncul dua kali pada tanggal yang sama.
+- Maksimum assignment per agent per minggu mengikuti pilihan 1x/2x/3x.
+- Hari libur tidak dihitung sebagai slot aktif.
+- Request khusus tetap tunduk pada aturan tanggal unik dan batas mingguan.
+- Jika seed/kode audit sama dan data serta konfigurasi sama, hasil scheduling konsisten.
+
+## Pengujian
+
+Unit test dapat dijalankan dengan:
+
+```bash
+python -m unittest -v test_floor_time.py
 ```
 
+<<<<<<< HEAD
 Atau upload CSV/Excel. Bila memakai CSV/Excel, aplikasi akan mencari kolom bernama `Agen`, `Nama`, atau `Nama Agen`. Jika tidak ada, kolom pertama akan digunakan.
 
 ## Aturan Jadwal
@@ -76,3 +128,6 @@ Jika ingin mengubah bentuk poster, pilih **Portrait** atau **Landscape** di side
 
 
 
+=======
+Test mencakup cross-month, cross-year, import format Excel baru, filter kehadiran dan pengecualian manual, ekstraksi Unit, sorting daftar bulanan, hari libur, anti-double, agent sedikit dengan repeat pada hari berbeda, insufficient capacity, dynamic poster height, dan dynamic monthly roster height.
+>>>>>>> 2c63294 (Update latest Floor Time Scheduler)
