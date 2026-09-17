@@ -42,9 +42,17 @@ APP_TITLE = "Brighton Floor Time Scheduler"
 DEFAULT_HUB_NAME = "HUB CIBUBUR"
 DEFAULT_LOGO_TEXT = "Brighton"
 EXPORT_RENDER_SCALE = 2
+MONTHLY_ROSTER_PAGE_SIZE = 20
+WEEK_AGENT_FONT_SIZE = 24
+WEEK_AGENT_LINE_STEP = 34
 
 BRIGHTON_YELLOW = "#FFD10A"
 BRIGHTON_BLACK = "#111111"
+BRIGHTON_NAVY = "#0A1E52"
+BRIGHTON_GOLD = "#F6A900"
+BRIGHTON_GOLD_SOFT = "#FFF8E5"
+SATURDAY_BG = "#FFF7D6"
+CARD_SHADOW = "#E6EAF0"
 HOLIDAY_RED = "#D92D20"
 HOLIDAY_BG = "#FFF7F6"
 TEXT_SECONDARY = "#515151"
@@ -186,6 +194,14 @@ def clean_text(value: object) -> str:
         return ""
     text = text.strip().strip("-•*;")
     return re.sub(r"\s+", " ", text).strip()
+
+
+def poster_notes(notes: Sequence[str], include_saturday: bool) -> List[str]:
+    """Tampilkan hanya catatan yang diisi pengguna, tanpa tambahan otomatis.
+
+    include_saturday dipertahankan untuk kompatibilitas pemanggil lama.
+    """
+    return [clean_text(note) for note in notes if clean_text(note)]
 
 
 def html_escape(value: object) -> str:
@@ -529,12 +545,10 @@ def generate_schedule(
     auto_expand_capacity: bool,
     seed_text: Optional[str],
 ) -> Tuple[pd.DataFrame, Dict[int, Dict[str, List[AssignmentEntry]]], Dict[int, Dict[str, int]], List[str]]:
-    """Generate schedule fair-distribution dengan aturan unik per tanggal.
+    """Penuhi target mingguan tiap agen secara bertahap pada tanggal berbeda.
 
-    - Semua agen diprioritaskan memperoleh minimal 1 assignment/minggu jika slot cukup.
-    - Jika target kapasitas masih belum penuh dan maxWeekly > 1, agen dapat berulang
-      pada hari berbeda secara merata hingga batas 2x/3x.
-    - Agen tidak pernah boleh muncul dua kali pada tanggal yang sama.
+    Mode ekspansi memenuhi target 1x/2x/3x dengan menambah kapasitas shift.
+    Mode kapasitas tetap dipertahankan untuk kompatibilitas pemanggil lama.
     """
     rng = make_rng(seed_text)
     warnings: List[str] = []
@@ -571,12 +585,21 @@ def generate_schedule(
             continue
 
         total_initial_capacity = sum(s.base_capacity for s in slots)
-        if len(agents) > total_initial_capacity and auto_expand_capacity:
-            target_per_slot = ceil(len(agents) / len(slots))
+        active_days = len({slot.tanggal for slot in slots})
+        weekly_target = min(max_weekly_assignments, active_days)
+        required_assignments = len(agents) * weekly_target
+        if active_days < max_weekly_assignments:
+            warnings.append(
+                f"Periode {week_range_label(sorted({s.tanggal for s in slots}))}: "
+                f"hanya {active_days} hari aktif; target {max_weekly_assignments}x "
+                f"tidak dapat dipenuhi tanpa tugas ganda sehari. Setiap agen dijadwalkan maksimal {weekly_target}x."
+            )
+        if required_assignments > total_initial_capacity and auto_expand_capacity:
+            target_per_slot = ceil(required_assignments / len(slots))
             for slot in slots:
                 capacity_by_week[week_no][slot.key] = max(slot.base_capacity, target_per_slot)
             warnings.append(
-                f"Periode {week_range_label(sorted({s.tanggal for s in slots}))}: kapasitas shift diperluas agar seluruh agen tetap bisa mendapat minimal satu jadwal."
+                f"Periode {week_range_label(sorted({s.tanggal for s in slots}))}: kapasitas shift diperluas agar setiap agen mendapat {weekly_target}x jadwal."
             )
 
         weekly_counts = {a.agent_id: 0 for a in agents}
@@ -612,78 +635,43 @@ def generate_schedule(
                     f"Request {agent.display_name} pada {format_date_id(req.tanggal, True)} dilewati karena bentrok tanggal, batas mingguan, atau kapasitas."
                 )
 
-        # 2) Prioritaskan setiap agen memperoleh minimal satu jadwal per minggu.
-        ordered_agents = list(agents)
-        rng.shuffle(ordered_agents)
-        ordered_agents.sort(key=lambda a: (month_counts[a.agent_id], -a.previous_month_attendance))
-
-        for agent in ordered_agents:
-            if weekly_counts[agent.agent_id] > 0:
-                continue
-            candidates = [
-                s for s in slots
-                if s.tanggal not in agent_dates[agent.agent_id]
-                and len(schedule[week_no][s.key]) < capacity_by_week[week_no][s.key]
-            ]
-            if not candidates and auto_expand_capacity:
-                # Untuk kasus agen lebih banyak daripada slot capacity, perluas slot paling ringan.
-                candidates = sorted(slots, key=lambda s: len(schedule[week_no][s.key]))[:1]
-                if candidates:
-                    capacity_by_week[week_no][candidates[0].key] += 1
-            if not candidates:
-                warnings.append(f"{agent.display_name} belum mendapat jadwal pada {week_range_label(sorted({s.tanggal for s in slots}))} karena kapasitas tidak cukup.")
-                continue
-            candidates.sort(
-                key=lambda s: _slot_score(
+        # Setiap putaran menyelesaikan kesempatan ke-1, ke-2, lalu ke-3.
+        # Request khusus sudah dihitung dalam target, bukan tambahan di luar target.
+        for round_target in range(1, weekly_target + 1):
+            ordered_agents = list(agents)
+            rng.shuffle(ordered_agents)
+            ordered_agents.sort(key=lambda a: (weekly_counts[a.agent_id], month_counts[a.agent_id]))
+            for agent in ordered_agents:
+                if weekly_counts[agent.agent_id] >= round_target:
+                    continue
+                available_dates = [s for s in slots if s.tanggal not in agent_dates[agent.agent_id]]
+                candidates = [s for s in available_dates
+                              if len(schedule[week_no][s.key]) < capacity_by_week[week_no][s.key]]
+                if not candidates and auto_expand_capacity and available_dates:
+                    # Kapasitas total cukup belum tentu tersedia pada tanggal yang
+                    # belum dipakai agen ini. Perluas shift ringan pada tanggal lain.
+                    chosen = min(available_dates, key=lambda s: (
+                        len(schedule[week_no][s.key]),
+                        _slot_score(s, schedule[week_no], capacity_by_week[week_no], agent,
+                                    agent_dates, month_shift_counts, last_date_by_agent, agent_map, rng),
+                    ))
+                    capacity_by_week[week_no][chosen.key] = len(schedule[week_no][chosen.key]) + 1
+                    candidates = [chosen]
+                if not candidates:
+                    continue
+                chosen = min(candidates, key=lambda s: _slot_score(
                     s, schedule[week_no], capacity_by_week[week_no], agent,
                     agent_dates, month_shift_counts, last_date_by_agent, agent_map, rng,
-                )
-            )
-            assign(agent, candidates[0])
+                ))
+                assign(agent, chosen)
 
-        # 3) Isi sisa kapasitas secara merata jika repeat 2x/3x diizinkan.
-        while True:
-            open_slots = [s for s in slots if len(schedule[week_no][s.key]) < capacity_by_week[week_no][s.key]]
-            if not open_slots:
-                break
-
-            # Mulai dari slot dengan rasio isi paling rendah agar distribusi antar shift seimbang.
-            open_slots.sort(
-                key=lambda s: (
-                    len(schedule[week_no][s.key]) / max(capacity_by_week[week_no][s.key], 1),
-                    s.tanggal,
-                    s.shift_index,
+        for agent in agents:
+            if weekly_counts[agent.agent_id] < weekly_target:
+                warnings.append(
+                    f"{agent.display_name}: mendapat {weekly_counts[agent.agent_id]} dari target "
+                    f"{weekly_target}x pada {week_range_label(sorted({s.tanggal for s in slots}))} "
+                    "karena kapasitas tanggal yang tersedia tidak cukup."
                 )
-            )
-            progress = False
-            for slot in open_slots:
-                eligible = [
-                    a for a in agents
-                    if weekly_counts[a.agent_id] < max_weekly_assignments
-                    and slot.tanggal not in agent_dates[a.agent_id]
-                ]
-                if not eligible:
-                    continue
-                rng.shuffle(eligible)
-                eligible.sort(
-                    key=lambda a: (
-                        weekly_counts[a.agent_id],
-                        month_counts[a.agent_id],
-                        sum(
-                            1 for entry in schedule[week_no][slot.key]
-                            if a.business_unit
-                            and agent_map.get(entry.agent_id) is not None
-                            and agent_map[entry.agent_id].business_unit == a.business_unit
-                        ),
-                        month_shift_counts[a.agent_id][slot.shift_index],
-                        1 if last_date_by_agent[a.agent_id] and abs((slot.tanggal - last_date_by_agent[a.agent_id]).days) == 1 else 0,
-                        -a.previous_month_attendance,
-                    )
-                )
-                if assign(eligible[0], slot):
-                    progress = True
-            if not progress:
-                break
 
         unfilled = sum(
             max(0, capacity_by_week[week_no][slot.key] - len(schedule[week_no][slot.key]))
@@ -788,42 +776,44 @@ def build_schedule_css() -> str:
     <style>
         :root {{
             --brighton-yellow: {BRIGHTON_YELLOW};
-            --brighton-black: {BRIGHTON_BLACK};
+            --brighton-gold: {BRIGHTON_GOLD};
+            --gold-soft: {BRIGHTON_GOLD_SOFT};
+            --saturday-bg: {SATURDAY_BG};
             --holiday-red: {HOLIDAY_RED};
             --holiday-bg: {HOLIDAY_BG};
-            --border: {BORDER_COLOR};
-            --muted: {TEXT_SECONDARY};
+            --border: #E4E8EE;
         }}
-        * {{ box-sizing: border-box; }}
-        body {{ margin:0; font-family: Inter, Arial, Helvetica, sans-serif; color:var(--brighton-black); background:#fff; }}
-        .poster {{ width:100%; max-width:1080px; margin:0 auto 28px; padding:36px 48px 24px; background:#fff; page-break-after:always; }}
-        .brand {{ text-align:center; font-size:62px; font-weight:800; letter-spacing:-2px; }}
-        .brand .o {{ color:var(--brighton-yellow); }}
-        .hub {{ text-align:center; font-size:18px; font-weight:800; letter-spacing:4px; margin-top:3px; }}
-        .brand-lines {{ display:flex; justify-content:center; gap:20px; margin:12px 0 26px; }}
-        .brand-lines span {{ width:60px; height:3px; background:var(--brighton-yellow); }}
-        .title {{ text-align:center; font-size:42px; font-weight:900; margin:0; letter-spacing:.5px; }}
-        .title-line {{ display:none; }}
-        .range {{ text-align:center; font-size:22px; font-weight:800; margin-bottom:26px; }}
-        .day-card {{ display:grid; grid-template-columns:25% 37.5% 37.5%; border:1px solid var(--border); border-radius:10px; margin:0 0 10px; overflow:hidden; min-height:138px; }}
-        .day-meta {{ padding:24px 24px; border-right:1px solid #eee; }}
-        .day-name {{ font-size:27px; font-weight:900; }}
-        .day-date {{ font-size:17px; margin-top:9px; }}
-        .day-accent {{ width:42px; height:2px; background:var(--brighton-yellow); margin-top:16px; }}
-        .shift {{ padding:22px 24px; }}
-        .shift + .shift {{ border-left:1px dashed #ddd; }}
-        .time {{ display:flex; gap:10px; align-items:center; font-size:17px; font-weight:800; margin-bottom:12px; }}
-        .clock {{ width:24px; height:24px; border:2px solid var(--brighton-yellow); border-radius:50%; display:inline-block; }}
-        .agents {{ margin:0; padding-left:20px; font-size:15px; line-height:1.55; }}
-        .special {{ float:right; background:var(--brighton-yellow); padding:4px 9px; border-radius:5px; font-size:11px; font-weight:800; }}
+        * {{ box-sizing:border-box; }}
+        body {{ margin:0; font-family:Inter,Arial,Helvetica,sans-serif; color:#111111; background:#fff; }}
+        .poster {{ width:100%; max-width:1080px; margin:0 auto 28px; padding:20px 38px 24px; background:#fff; page-break-after:always; }}
+        .brand {{ text-align:center; font-size:58px; font-weight:900; line-height:1.2; letter-spacing:-2px; color:#111111; }}
+        .brand .o {{ color:var(--brighton-gold); }}
+        .hub {{ text-align:center; font-size:16px; font-weight:800; letter-spacing:5px; margin-top:18px; color:#111111; }}
+        .brand-lines {{ display:none; }}
+        .title {{ text-align:center; font-size:40px; font-weight:900; margin:17px 0 5px; letter-spacing:.2px; color:#111111; }}
+        .range {{ width:max-content; margin:0 auto 22px; padding:0; border:0; font-size:20px; font-weight:800; color:#111111; }}
+        .day-card {{ display:grid; grid-template-columns:25% 37.5% 37.5%; border:1px solid #E4E8EE; border-radius:14px; margin:0 0 12px; overflow:hidden; min-height:156px; background:#fff; box-shadow:0 6px 16px rgba(17,17,17,.08); }}
+        .day-card.saturday {{ background:var(--saturday-bg); border-color:#F0D77A; }}
+        .day-meta {{ padding:27px 30px; border-right:1px solid #DCE2EA; }}
+        .day-name {{ font-size:32px; font-weight:900; color:#111111; }}
+        .day-date {{ font-size:20px; margin-top:8px; color:#111111; }}
+        .day-accent {{ display:none; }}
+        .shift {{ padding:21px 28px; }}
+        .shift + .shift {{ border-left:1px solid #DCE2EA; }}
+        .time {{ display:flex; gap:12px; align-items:center; font-size:24px; font-weight:700; margin-bottom:10px; padding:5px 10px; background:linear-gradient(90deg,var(--gold-soft),rgba(255,248,229,0)); border-radius:7px; color:#111111; }}
+        .clock {{ width:25px; height:25px; border:3px solid var(--brighton-gold); border-radius:50%; display:inline-block; flex:0 0 25px; }}
+        .agents {{ margin:0; padding-left:25px; font-size:24px; font-weight:600; line-height:1.42; overflow-wrap:anywhere; color:#111111; }}
+        .agents li {{ margin-bottom:8px; }}
+        .agents li::marker {{ color:var(--brighton-gold); }}
+        .special {{ display:none; }}
         .holiday {{ border-color:#ef9a94; background:var(--holiday-bg); grid-template-columns:25% 75%; }}
-        .holiday .day-meta {{ border-right:1px solid #ef9a94; }}
-        .holiday .day-name, .holiday .day-date, .holiday .holiday-name {{ color:var(--holiday-red); }}
-        .holiday .day-accent {{ background:var(--holiday-red); }}
-        .holiday-name {{ display:flex; align-items:center; padding:24px 38px; font-size:19px; font-weight:700; }}
-        .notes {{ margin-top:14px; border:1px solid var(--border); border-radius:10px; padding:20px 26px; display:grid; grid-template-columns:150px 1fr; gap:20px; }}
-        .notes-title {{ font-size:19px; font-weight:900; border-right:3px solid var(--brighton-yellow); }}
-        .notes ul {{ margin:0; padding-left:22px; font-size:14px; line-height:1.65; }}
+        .holiday .day-meta {{ border-right:1px solid #ef9a94; display:flex; flex-direction:column; justify-content:center; }}
+        .holiday .day-name,.holiday .day-date,.holiday .holiday-name {{ color:#111111; }}
+        .holiday-name {{ display:flex; align-items:center; padding:24px 38px; font-size:20px; font-weight:800; }}
+        .notes {{ margin-top:16px; border:1px solid #E4E8EE; border-radius:14px; padding:20px 26px; display:grid; grid-template-columns:165px 1fr; gap:20px; box-shadow:0 5px 14px rgba(17,17,17,.06); }}
+        .notes-title {{ font-size:21px; font-weight:900; color:#111111; border-right:3px solid var(--brighton-gold); }}
+        .notes ul {{ margin:0; padding-left:22px; font-size:16px; line-height:1.6; color:#111111; }}
+        .notes li::marker {{ color:var(--brighton-gold); }}
         @media print {{ .poster {{ max-width:none; margin:0; border:none; }} }}
     </style>
     """
@@ -863,12 +853,12 @@ def render_week_html(
         day_slots = sorted(slot_by_date.get(d, []), key=lambda s: s.shift_index)
         shift_html = ""
         for slot in day_slots:
-            badge = "<span class='special'>Jam Operasional Khusus</span>" if d.weekday() == 5 and slot.shift_index == 1 else ""
+            badge = ""
             shift_html += f"""
               <div class="shift">{badge}<div class="time"><span class="clock"></span>{html_escape(slot.time_label)}</div>{render_agent_list_html(schedule_for_week.get(slot.key, []))}</div>
             """
         cards.append(f"""
-        <section class="day-card">
+        <section class="day-card {'saturday' if d.weekday() == 5 else ''}">
           <div class="day-meta"><div class="day-name">{DAY_NAMES_ID[d.weekday()]}</div><div class="day-date">{format_date_id(d)}</div><div class="day-accent"></div></div>
           {shift_html}
         </section>""")
@@ -876,16 +866,21 @@ def render_week_html(
     safe_logo = html_escape(logo_text or DEFAULT_LOGO_TEXT)
     if safe_logo.casefold() == "brighton":
         safe_logo = "Bright<span class='o'>o</span>n"
-    notes_html = "".join(f"<li>{html_escape(n)}</li>" for n in notes if clean_text(n))
+    include_saturday = any(d.weekday() == 5 and d not in holidays for d in week_dates)
+    notes_html = "".join(
+        f"<li>{html_escape(note)}</li>"
+        for note in poster_notes(notes, include_saturday=include_saturday)
+    )
+    notes_section = f'<div class="notes"><div class="notes-title">CATATAN</div><ul>{notes_html}</ul></div>' if notes_html else ""
     return f"""
     <div class="poster">
       <div class="brand">{safe_logo}</div>
       <div class="hub">{html_escape(hub_name)}</div>
       <div class="brand-lines"><span></span><span></span></div>
       <h1 class="title">FLOOR TIME SCHEDULE</h1>
-      <div class="range" style="margin-top:18px;">{week_range_label(week_dates)}</div>
+      <div class="range">{week_range_label(week_dates)}</div>
       {''.join(cards)}
-      <div class="notes"><div class="notes-title">CATATAN</div><ul>{notes_html}</ul></div>
+      {notes_section}
     </div>
     """
 
@@ -1161,7 +1156,7 @@ def draw_brighton_logo(draw: ImageDraw.ImageDraw, center_x: int, y: int, font: I
         w, _ = text_size(draw, logo, font)
         draw.text((center_x - w // 2, y), logo, font=font, fill=BRIGHTON_BLACK)
         return
-    parts = [("Bright", BRIGHTON_BLACK), ("o", BRIGHTON_YELLOW), ("n", BRIGHTON_BLACK)]
+    parts = [("Bright", BRIGHTON_BLACK), ("o", BRIGHTON_GOLD), ("n", BRIGHTON_BLACK)]
     widths = [text_size(draw, p, font)[0] for p, _ in parts]
     x = center_x - sum(widths) // 2
     for (part, color), w in zip(parts, widths):
@@ -1173,11 +1168,78 @@ def rounded_rect(draw: ImageDraw.ImageDraw, box: Tuple[int, int, int, int], radi
     draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
 
 
-def split_entries_columns(entries: Sequence[AssignmentEntry], threshold: int = 12) -> List[List[AssignmentEntry]]:
-    if len(entries) <= threshold:
-        return [list(entries)]
-    midpoint = ceil(len(entries) / 2)
-    return [list(entries[:midpoint]), list(entries[midpoint:])]
+def split_entries_columns(entries: Sequence[AssignmentEntry], threshold: int = 8) -> List[List[AssignmentEntry]]:
+    # Satu kolom per shift: jumlah agen hanya menambah tinggi, bukan
+    # mempersempit ruang nama atau mengecilkan huruf.
+    return [list(entries)]
+
+
+def wrap_agent_name(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.ImageFont,
+    max_width: int,
+) -> List[str]:
+    """Wrap nama agen tanpa mengubah ukuran font atau memotong identitasnya."""
+    words = clean_text(text).split()
+    if not words:
+        return ["-"]
+    lines: List[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if not current or text_size(draw, candidate, font)[0] <= max_width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def agent_entries_height(
+    draw: ImageDraw.ImageDraw,
+    entries: Sequence[AssignmentEntry],
+    width: int,
+    font: ImageFont.ImageFont,
+    scale: int,
+) -> int:
+    """Hitung tinggi daftar berdasarkan hasil wrap, bukan jumlah agen saja."""
+    if not entries:
+        return 36 * scale
+    columns = split_entries_columns(entries)
+    col_gap = 16 * scale
+    col_w = (width - col_gap * (len(columns) - 1)) // len(columns)
+    max_text_w = max(40 * scale, col_w - 18 * scale)
+    line_step = WEEK_AGENT_LINE_STEP * scale
+    item_gap = 8 * scale
+    return max(
+        sum(max(line_step, len(wrap_agent_name(draw, entry.display_name, font, max_text_w)) * line_step) + item_gap for entry in column)
+        for column in columns
+    )
+
+
+def build_note_layout(
+    draw: ImageDraw.ImageDraw,
+    notes: Sequence[str],
+    include_saturday: bool,
+    max_text_width: int,
+    font: ImageFont.ImageFont,
+    scale: int,
+) -> Tuple[List[str], List[List[str]], int, int, int]:
+    """Hitung wrap dan tinggi catatan agar tidak menyisakan ruang kosong tetap."""
+    clean_notes = poster_notes(notes, include_saturday=include_saturday)
+    wrapped_notes = [
+        wrap_agent_name(draw, note, font, max_text_width)
+        for note in clean_notes
+    ]
+    line_step = 27 * scale
+    item_gap = 8 * scale
+    content_h = sum(len(lines) * line_step for lines in wrapped_notes)
+    content_h += max(0, len(wrapped_notes) - 1) * item_gap
+    notes_h = max(96 * scale, content_h + 36 * scale) if clean_notes else 0
+    return clean_notes, wrapped_notes, notes_h, line_step, item_gap
 
 
 def calculate_week_image_metrics(
@@ -1185,6 +1247,7 @@ def calculate_week_image_metrics(
     slots: Sequence[ShiftSlot],
     schedule_for_week: Dict[str, List[AssignmentEntry]],
     holidays: Dict[date, HolidayInfo],
+    notes: Sequence[str],
     orientation: str,
 ) -> Dict[str, object]:
     """Ukuran font tidak pernah dikecilkan; tinggi canvas mengikuti isi."""
@@ -1192,18 +1255,35 @@ def calculate_week_image_metrics(
     base_width = 1680 if orientation == "Landscape" else 1080
     width = base_width * scale
     margin = (58 if orientation == "Landscape" else 50) * scale
-    header_h = (300 if orientation == "Landscape" else 310) * scale
+    header_h = 250 * scale
     card_gap = 10 * scale
-    notes_h = 116 * scale
-    footer_h = 18 * scale
-    bottom_pad = 26 * scale
-    agent_row_h = (27 if orientation == "Landscape" else 27) * scale
-    normal_min_h = (158 if orientation == "Landscape" else 164) * scale
+    bottom_pad = 24 * scale
+    normal_min_h = (178 if orientation == "Landscape" else 184) * scale
     holiday_h = (108 if orientation == "Landscape" else 116) * scale
 
     slot_by_date: Dict[date, List[ShiftSlot]] = {}
     for slot in slots:
         slot_by_date.setdefault(slot.tanggal, []).append(slot)
+
+    dummy = Image.new("RGB", (width, 240 * scale), "#FFFFFF")
+    dummy_draw = ImageDraw.Draw(dummy)
+    agent_font = find_inter_font(WEEK_AGENT_FONT_SIZE * scale, bold=True)
+    card_w = width - 2 * margin
+    day_col_w = int(card_w * 0.25)
+    shift_col_w = (card_w - day_col_w) // 2
+    entries_w = shift_col_w - 60 * scale
+
+    note_font = find_inter_font(18 * scale, bold=False)
+    note_text_w = max(200 * scale, card_w - 262 * scale)
+    include_saturday = any(d.weekday() == 5 and d not in holidays for d in week_dates)
+    clean_notes, note_lines, notes_h, note_line_step, note_item_gap = build_note_layout(
+        dummy_draw,
+        notes,
+        include_saturday,
+        note_text_w,
+        note_font,
+        scale,
+    )
 
     day_heights: Dict[date, int] = {}
     for d in week_dates:
@@ -1211,17 +1291,18 @@ def calculate_week_image_metrics(
             day_heights[d] = holiday_h
             continue
         day_slots = slot_by_date.get(d, [])
-        max_rows = 1
+        max_content_h = 36 * scale
         for slot in day_slots:
             entries = schedule_for_week.get(slot.key, [])
-            columns = split_entries_columns(entries)
-            max_rows = max(max_rows, max((len(col) for col in columns), default=1))
-        needed = (86 * scale) + max_rows * agent_row_h
+            max_content_h = max(
+                max_content_h,
+                agent_entries_height(dummy_draw, entries, entries_w, agent_font, scale),
+            )
+        needed = (88 * scale) + max_content_h
         day_heights[d] = max(normal_min_h, needed)
 
     total_cards = sum(day_heights.values()) + max(0, len(week_dates) - 1) * card_gap
-    min_height = (1528 if orientation == "Portrait" else 1188) * scale
-    height = max(min_height, header_h + total_cards + notes_h + footer_h + bottom_pad + 28 * scale)
+    height = header_h + total_cards + notes_h + bottom_pad + 17 * scale
     return {
         "scale": scale,
         "width": width,
@@ -1230,9 +1311,11 @@ def calculate_week_image_metrics(
         "header_h": header_h,
         "card_gap": card_gap,
         "notes_h": notes_h,
-        "footer_h": footer_h,
+        "clean_notes": clean_notes,
+        "note_lines": note_lines,
+        "note_line_step": note_line_step,
+        "note_item_gap": note_item_gap,
         "day_heights": day_heights,
-        "agent_row_h": agent_row_h,
     }
 
 
@@ -1242,14 +1325,13 @@ def draw_agent_entries(
     x: int,
     y: int,
     width: int,
-    row_h: int,
     font: ImageFont.ImageFont,
     scale: int,
 ) -> None:
     columns = split_entries_columns(entries)
     if not entries:
-        muted_font = find_inter_font(14 * scale, bold=False)
-        draw.text((x, y), "Slot Belum Terisi", font=muted_font, fill="#8A8A8A")
+        muted_font = find_inter_font(18 * scale, bold=False)
+        draw.text((x, y), "Slot Belum Terisi", font=muted_font, fill=BRIGHTON_BLACK)
         return
 
     col_gap = 16 * scale
@@ -1257,29 +1339,17 @@ def draw_agent_entries(
     bullet_r = 3 * scale
     for col_idx, col in enumerate(columns):
         cx = x + col_idx * (col_w + col_gap)
-        for row_idx, entry in enumerate(col):
-            ry = y + row_idx * row_h
-            draw.ellipse((cx, ry + 8 * scale, cx + bullet_r * 2, ry + 14 * scale), fill=BRIGHTON_BLACK)
+        ry = y
+        line_step = WEEK_AGENT_LINE_STEP * scale
+        item_gap = 8 * scale
+        max_text_w = max(40 * scale, col_w - 18 * scale)
+        for entry in col:
+            draw.ellipse((cx, ry + 8 * scale, cx + bullet_r * 2, ry + 14 * scale), fill=BRIGHTON_GOLD)
             text_x = cx + 16 * scale
-            # Tidak mengecilkan font. Bila nama panjang, wrap maksimal dua baris.
-            max_text_w = col_w - 18 * scale
-            text = entry.display_name
-            if text_size(draw, text, font)[0] <= max_text_w:
-                draw.text((text_x, ry), text, font=font, fill=BRIGHTON_BLACK)
-            else:
-                words = text.split()
-                line1 = ""
-                line2 = ""
-                for word in words:
-                    candidate = (line1 + " " + word).strip()
-                    if not line2 and text_size(draw, candidate, font)[0] <= max_text_w:
-                        line1 = candidate
-                    else:
-                        line2 = (line2 + " " + word).strip()
-                draw.text((text_x, ry - 2 * scale), line1, font=font, fill=BRIGHTON_BLACK)
-                if line2:
-                    small = find_inter_font(12 * scale, bold=False)
-                    draw.text((text_x, ry + 15 * scale), line2, font=small, fill=TEXT_SECONDARY)
+            lines = wrap_agent_name(draw, entry.display_name, font, max_text_w)
+            for line_index, line in enumerate(lines):
+                draw.text((text_x, ry + line_index * line_step), line, font=font, fill=BRIGHTON_BLACK)
+            ry += max(line_step, len(lines) * line_step) + item_gap
 
 
 def render_week_image(
@@ -1292,154 +1362,186 @@ def render_week_image(
     notes: Sequence[str],
     orientation: str,
 ) -> Image.Image:
-    metrics = calculate_week_image_metrics(week_dates, slots, schedule_for_week, holidays, orientation)
+    """Render poster mingguan bergaya corporate premium.
+
+    Prinsip penting: ukuran font tidak pernah diturunkan saat jumlah agen bertambah.
+    Card dan canvas yang bertambah tinggi, sehingga poster tetap terbaca ketika
+    jumlah agen besar. Sabtu diberi tint kuning lembut karena jam operasionalnya
+    berbeda, tanpa badge tambahan agar visual tetap bersih.
+    """
+    metrics = calculate_week_image_metrics(week_dates, slots, schedule_for_week, holidays, notes, orientation)
     scale = int(metrics["scale"])
     width = int(metrics["width"])
     height = int(metrics["height"])
     margin = int(metrics["margin"])
+    header_h = int(metrics["header_h"])
     card_gap = int(metrics["card_gap"])
     notes_h = int(metrics["notes_h"])
-    footer_h = int(metrics["footer_h"])
+    note_lines: List[List[str]] = metrics["note_lines"]  # type: ignore[assignment]
+    note_line_step = int(metrics["note_line_step"])
+    note_item_gap = int(metrics["note_item_gap"])
     day_heights: Dict[date, int] = metrics["day_heights"]  # type: ignore[assignment]
-    agent_row_h = int(metrics["agent_row_h"])
 
     img = Image.new("RGB", (width, height), "#FFFFFF")
     draw = ImageDraw.Draw(img)
 
-    # Header modern: putih, logo tengah, sudut kuning minimal seperti referensi.
-    corner = 110 * scale
-    draw.polygon([(0, 0), (corner, 0), (34 * scale, 118 * scale), (0, 118 * scale)], fill=BRIGHTON_YELLOW)
-    draw.polygon([(width, 0), (width - corner, 0), (width - 34 * scale, 118 * scale), (width, 118 * scale)], fill=BRIGHTON_YELLOW)
-    draw.line((72 * scale, 16 * scale, 20 * scale, 90 * scale), fill=BRIGHTON_YELLOW, width=2 * scale)
-    draw.line((width - 72 * scale, 16 * scale, width - 20 * scale, 90 * scale), fill=BRIGHTON_YELLOW, width=2 * scale)
-
+    # Header dibuat ringkas dan bebas ornamen sudut agar fokus pada jadwal.
     logo_font = find_inter_font(58 * scale, bold=True)
-    draw_brighton_logo(draw, width // 2, 22 * scale, logo_font, logo_text)
+    draw_brighton_logo(draw, width // 2, 18 * scale, logo_font, logo_text)
     hub_font = find_inter_font(16 * scale, bold=True)
     hub = clean_text(hub_name) or DEFAULT_HUB_NAME
     hub_w, _ = text_size(draw, hub, hub_font)
-    hub_y = 102 * scale
-    line_y = hub_y + 9 * scale
-    draw.line((width // 2 - 170 * scale, line_y, width // 2 - 95 * scale, line_y), fill=BRIGHTON_YELLOW, width=2 * scale)
+    logo_bottom = draw.textbbox((0, 18 * scale), clean_text(logo_text) or DEFAULT_LOGO_TEXT, font=logo_font)[3]
+    hub_top = draw.textbbox((0, 0), hub, font=hub_font)[1]
+    hub_y = logo_bottom + 18 * scale - hub_top
     draw.text((width // 2 - hub_w // 2, hub_y), hub, font=hub_font, fill=BRIGHTON_BLACK)
-    draw.line((width // 2 + 95 * scale, line_y, width // 2 + 170 * scale, line_y), fill=BRIGHTON_YELLOW, width=2 * scale)
 
-    title_font = find_inter_font(39 * scale, bold=True)
+    title_font = find_inter_font(40 * scale, bold=True)
     title = "FLOOR TIME SCHEDULE"
     tw, th = text_size(draw, title, title_font)
-    title_y = 150 * scale
+    title_y = max(140 * scale, draw.textbbox((0, hub_y), hub, font=hub_font)[3] + 20 * scale)
     draw.text((width // 2 - tw // 2, title_y), title, font=title_font, fill=BRIGHTON_BLACK)
 
+    # Rentang tanggal tampil sebagai teks bersih tanpa pill/bingkai.
     range_font = find_inter_font(20 * scale, bold=True)
     range_text = week_range_label(week_dates)
     rw, _ = text_size(draw, range_text, range_font)
-    draw.text((width // 2 - rw // 2, title_y + th + 24 * scale), range_text, font=range_font, fill=BRIGHTON_BLACK)
+    range_y = draw.textbbox((0, title_y), title, font=title_font)[3] + 10 * scale
+    draw.text((width // 2 - rw // 2, range_y), range_text, font=range_font, fill=BRIGHTON_BLACK)
 
-    # Cards.
+    # Slot index by date.
     slot_by_date: Dict[date, List[ShiftSlot]] = {}
     for slot in slots:
         slot_by_date.setdefault(slot.tanggal, []).append(slot)
 
-    y = 282 * scale
+    y = header_h
     card_x1 = margin
     card_x2 = width - margin
     card_w = card_x2 - card_x1
     day_col_w = int(card_w * 0.25)
     shift_col_w = (card_w - day_col_w) // 2
 
-    day_font = find_inter_font(27 * scale, bold=True)
-    date_font = find_inter_font(16 * scale, bold=False)
-    time_font = find_inter_font(16 * scale, bold=True)
-    agent_font = find_inter_font(14 * scale, bold=False)
-    holiday_font = find_inter_font(18 * scale, bold=True)
-    badge_font = find_inter_font(10 * scale, bold=True)
+    day_font = find_inter_font(36 * scale, bold=True)
+    date_font = find_inter_font(22 * scale, bold=False)
+    time_font = find_inter_font(24 * scale, bold=True)
+    agent_font = find_inter_font(WEEK_AGENT_FONT_SIZE * scale, bold=True)
+    holiday_font = find_inter_font(22 * scale, bold=True)
 
-    for d in week_dates:
+    for day_index, d in enumerate(week_dates):
         card_h = day_heights[d]
         is_holiday = d in holidays
-        fill = HOLIDAY_BG if is_holiday else "#FFFFFF"
-        outline = "#ED9A94" if is_holiday else BORDER_COLOR
-        rounded_rect(draw, (card_x1, y, card_x2, y + card_h), 10 * scale, fill, outline, 1 * scale)
+        is_saturday = d.weekday() == 5 and not is_holiday
+        fill = HOLIDAY_BG if is_holiday else (SATURDAY_BG if is_saturday else "#FFFFFF")
+        outline = "#ED9A94" if is_holiday else ("#EAD27A" if is_saturday else "#E2E7EE")
+
+        # Soft shadow for depth without making the poster busy.
+        shadow_offset = 5 * scale
+        rounded_rect(
+            draw,
+            (card_x1 + shadow_offset, y + shadow_offset, card_x2 + shadow_offset, y + card_h + shadow_offset),
+            14 * scale,
+            CARD_SHADOW,
+            CARD_SHADOW,
+            1 * scale,
+        )
+        rounded_rect(draw, (card_x1, y, card_x2, y + card_h), 14 * scale, fill, outline, 1 * scale)
 
         divider_x = card_x1 + day_col_w
-        divider_color = "#ED9A94" if is_holiday else "#ECECEC"
-        draw.line((divider_x, y + 16 * scale, divider_x, y + card_h - 16 * scale), fill=divider_color, width=1 * scale)
+        divider_color = "#ED9A94" if is_holiday else "#D8DFE8"
+        draw.line((divider_x, y + 20 * scale, divider_x, y + card_h - 20 * scale), fill=divider_color, width=1 * scale)
 
         meta_x = card_x1 + 38 * scale
-        day_color = HOLIDAY_RED if is_holiday else BRIGHTON_BLACK
-        draw.text((meta_x, y + 28 * scale), DAY_NAMES_ID[d.weekday()], font=day_font, fill=day_color)
-        draw.text((meta_x, y + 68 * scale), format_date_id(d), font=date_font, fill=day_color)
-        accent_color = HOLIDAY_RED if is_holiday else BRIGHTON_YELLOW
-        draw.rectangle((meta_x, y + 104 * scale, meta_x + 44 * scale, y + 106 * scale), fill=accent_color)
+        day_color = BRIGHTON_BLACK
+        day_text = DAY_NAMES_ID[d.weekday()]
+        date_text = format_date_id(d)
+        if is_holiday:
+            _, day_text_h = text_size(draw, day_text, day_font)
+            _, date_text_h = text_size(draw, date_text, date_font)
+            meta_gap = 10 * scale
+            meta_group_h = day_text_h + meta_gap + date_text_h
+            day_y = y + (card_h - meta_group_h) // 2
+            date_y = day_y + day_text_h + meta_gap
+        else:
+            day_y = y + 30 * scale
+            date_y = y + 82 * scale
+        draw.text((meta_x, day_y), day_text, font=day_font, fill=day_color)
+        draw.text((meta_x, date_y), date_text, font=date_font, fill=day_color)
 
         if is_holiday:
             name_x = divider_x + 44 * scale
-            name_y = y + (card_h - text_size(draw, holidays[d].name, holiday_font)[1]) // 2 - 2 * scale
-            draw.text((name_x, name_y), holidays[d].name, font=holiday_font, fill=HOLIDAY_RED)
-            y += card_h + card_gap
+            name_h = text_size(draw, holidays[d].name, holiday_font)[1]
+            name_y = y + (card_h - name_h) // 2 - 2 * scale
+            draw.text((name_x, name_y), holidays[d].name, font=holiday_font, fill=BRIGHTON_BLACK)
+            y += card_h + (card_gap if day_index < len(week_dates) - 1 else 0)
             continue
 
         day_slots = sorted(slot_by_date.get(d, []), key=lambda s: s.shift_index)
         for idx, slot in enumerate(day_slots[:2]):
             sx = divider_x + idx * shift_col_w
             if idx == 1:
-                draw.line((sx, y + 22 * scale, sx, y + card_h - 22 * scale), fill="#D8D8D8", width=1 * scale)
+                draw.line((sx, y + 22 * scale, sx, y + card_h - 22 * scale), fill="#D8DFE8", width=1 * scale)
+
             pad = 30 * scale
             content_x = sx + pad
-            clock_center = (content_x + 14 * scale, y + 38 * scale)
-            draw_clock_icon(draw, clock_center, 12 * scale, BRIGHTON_YELLOW, 2 * scale)
-            draw.text((content_x + 38 * scale, y + 25 * scale), slot.time_label, font=time_font, fill=BRIGHTON_BLACK)
-            draw.line((content_x + 38 * scale, y + 52 * scale, content_x + 175 * scale, y + 52 * scale), fill=BRIGHTON_YELLOW, width=1 * scale)
 
-            if d.weekday() == 5 and idx == 1:
-                badge = "Jam Operasional Khusus"
-                bw, bh = text_size(draw, badge, badge_font)
-                bx2 = sx + shift_col_w - 16 * scale
-                bx1 = bx2 - bw - 18 * scale
-                by1 = y + 8 * scale
-                rounded_rect(draw, (bx1, by1, bx2, by1 + bh + 10 * scale), 5 * scale, BRIGHTON_YELLOW, BRIGHTON_YELLOW, 1)
-                draw.text((bx1 + 9 * scale, by1 + 5 * scale), badge, font=badge_font, fill=BRIGHTON_BLACK)
+            # Soft gold time band, matching the third reference.
+            band_y1 = y + 19 * scale
+            band_y2 = y + 55 * scale
+            band_x2 = sx + shift_col_w - 26 * scale
+            rounded_rect(draw, (content_x + 30 * scale, band_y1, band_x2, band_y2), 7 * scale, BRIGHTON_GOLD_SOFT, BRIGHTON_GOLD_SOFT, 1)
+            clock_center = (content_x + 14 * scale, y + 37 * scale)
+            draw_clock_icon(draw, clock_center, 12 * scale, BRIGHTON_GOLD, 2 * scale)
+            draw.text((content_x + 38 * scale, y + 24 * scale), slot.time_label, font=time_font, fill=BRIGHTON_BLACK)
 
             entries = schedule_for_week.get(slot.key, [])
             draw_agent_entries(
                 draw,
                 entries,
                 x=content_x,
-                y=y + 70 * scale,
+                y=y + 69 * scale,
                 width=shift_col_w - 2 * pad,
-                row_h=agent_row_h,
                 font=agent_font,
                 scale=scale,
             )
 
-        y += card_h + card_gap
+        y += card_h + (card_gap if day_index < len(week_dates) - 1 else 0)
 
-    # Catatan sederhana tanpa icon besar.
-    notes_y = y + 4 * scale
-    notes_w = card_w
-    rounded_rect(draw, (card_x1, notes_y, card_x2, notes_y + notes_h), 10 * scale, "#FAFAFA", BORDER_COLOR, 1 * scale)
-    note_title_font = find_inter_font(18 * scale, bold=True)
-    note_font = find_inter_font(13 * scale, bold=False)
-    title_x = card_x1 + 34 * scale
-    draw.text((title_x, notes_y + 30 * scale), "CATATAN", font=note_title_font, fill=BRIGHTON_BLACK)
-    sep_x = title_x + 120 * scale
-    draw.rectangle((sep_x, notes_y + 24 * scale, sep_x + 3 * scale, notes_y + notes_h - 24 * scale), fill=BRIGHTON_YELLOW)
+    if not note_lines:
+        return img
+
+    # Notes area.
+    notes_y = y + 12 * scale
+    shadow_offset = 5 * scale
+    rounded_rect(
+        draw,
+        (card_x1 + shadow_offset, notes_y + shadow_offset, card_x2 + shadow_offset, notes_y + notes_h + shadow_offset),
+        14 * scale,
+        CARD_SHADOW,
+        CARD_SHADOW,
+        1,
+    )
+    rounded_rect(draw, (card_x1, notes_y, card_x2, notes_y + notes_h), 14 * scale, "#FFFFFF", "#E2E7EE", 1 * scale)
+    note_title_font = find_inter_font(22 * scale, bold=True)
+    note_font = find_inter_font(18 * scale, bold=False)
+    title_x = card_x1 + 42 * scale
+    _, note_title_h = text_size(draw, "CATATAN", note_title_font)
+    draw.text((title_x, notes_y + (notes_h - note_title_h) // 2), "CATATAN", font=note_title_font, fill=BRIGHTON_BLACK)
+    sep_x = title_x + 132 * scale
+    draw.rectangle((sep_x, notes_y + 18 * scale, sep_x + 3 * scale, notes_y + notes_h - 18 * scale), fill=BRIGHTON_GOLD)
     note_x = sep_x + 34 * scale
-    note_y = notes_y + 24 * scale
-    clean_notes = [clean_text(n) for n in notes if clean_text(n)] or ["Agen yang mendapatkan jadwal floor time masih berada di kantor."]
-    for note in clean_notes[:3]:
-        draw.ellipse((note_x, note_y + 7 * scale, note_x + 6 * scale, note_y + 13 * scale), fill=BRIGHTON_BLACK)
-        draw.text((note_x + 18 * scale, note_y), note, font=note_font, fill=BRIGHTON_BLACK)
-        note_y += 28 * scale
-
-    # Footer accent.
-    draw.rectangle((0, height - footer_h, width, height), fill=BRIGHTON_YELLOW)
-    draw.polygon([
-        (int(width * 0.80), height - footer_h),
-        (int(width * 0.86), height - footer_h),
-        (int(width * 0.84), height),
-        (int(width * 0.78), height),
-    ], fill="#151515")
+    note_content_h = sum(len(lines) * note_line_step for lines in note_lines)
+    note_content_h += max(0, len(note_lines) - 1) * note_item_gap
+    note_y = notes_y + (notes_h - note_content_h) // 2
+    for lines in note_lines:
+        draw.ellipse((note_x, note_y + 8 * scale, note_x + 7 * scale, note_y + 15 * scale), fill=BRIGHTON_GOLD)
+        for line_index, line in enumerate(lines):
+            draw.text(
+                (note_x + 20 * scale, note_y + line_index * note_line_step),
+                line,
+                font=note_font,
+                fill=BRIGHTON_BLACK,
+            )
+        note_y += len(lines) * note_line_step + note_item_gap
     return img
 
 
@@ -1508,6 +1610,197 @@ def _wrap_text_for_width(
     return lines or [value]
 
 
+def _render_monthly_agent_roster_page(
+    page_agents: Sequence[AgentRecord],
+    total_agent_count: int,
+    target_year: int,
+    target_month: int,
+    columns: Sequence[str],
+    hub_name: str,
+    logo_text: str,
+    page_number: int,
+    total_pages: int,
+) -> Image.Image:
+    """Render satu halaman daftar bulanan dengan ukuran huruf tetap besar."""
+    width = 1080
+    margin = 50
+    top_table = 220
+    header_row_h = 64
+    footer_h = 54
+    bottom_pad = 18
+    table_w = width - 2 * margin
+
+    weight_map = {
+        "Nama": 0.34,
+        "Jabatan": 0.27,
+        "Unit": 0.19,
+        "Total Kehadiran": 0.20,
+    }
+    total_weight = sum(weight_map[column] for column in columns)
+    col_widths = [int(table_w * weight_map[column] / total_weight) for column in columns]
+    col_widths[-1] += table_w - sum(col_widths)
+
+    body_font = find_inter_font(23, bold=False)
+    header_font = find_inter_font(20, bold=True)
+    dummy = Image.new("RGB", (width, 240), "#FFFFFF")
+    dummy_draw = ImageDraw.Draw(dummy)
+
+    row_layouts: List[Tuple[int, List[List[str]]]] = []
+    for agent in page_agents:
+        wrapped_cells: List[List[str]] = []
+        max_lines = 1
+        for column, col_w in zip(columns, col_widths):
+            lines = [_roster_cell_value(agent, column)] if column == "Total Kehadiran" else _wrap_text_for_width(
+                dummy_draw,
+                _roster_cell_value(agent, column),
+                body_font,
+                max(60, col_w - 36),
+            )
+            wrapped_cells.append(lines)
+            max_lines = max(max_lines, len(lines))
+        row_layouts.append((max(68, 31 * max_lines + 24), wrapped_cells))
+
+    rows_h = sum(row_h for row_h, _ in row_layouts)
+    height = max(620, top_table + header_row_h + rows_h + bottom_pad + footer_h)
+    img = Image.new("RGB", (width, height), "#FFFFFF")
+    draw = ImageDraw.Draw(img)
+
+    # Aksen atas diperkecil agar branding tetap terasa tanpa memakan area konten.
+    corner = 88
+    draw.polygon([(0, 0), (corner, 0), (26, 92), (0, 92)], fill=BRIGHTON_YELLOW)
+    draw.polygon([(width, 0), (width - corner, 0), (width - 26, 92), (width, 92)], fill=BRIGHTON_YELLOW)
+
+    logo_font = find_inter_font(54, bold=True)
+    draw_brighton_logo(draw, width // 2, 14, logo_font, logo_text)
+    hub_font = find_inter_font(16, bold=True)
+    hub = clean_text(hub_name) or DEFAULT_HUB_NAME
+    hub_w, _ = text_size(draw, hub, hub_font)
+    # Jarak dihitung dari batas tinta logo, termasuk ekor huruf g.
+    logo_bottom = draw.textbbox((0, 14), clean_text(logo_text) or DEFAULT_LOGO_TEXT, font=logo_font)[3]
+    hub_top = draw.textbbox((0, 0), hub, font=hub_font)[1]
+    hub_y = logo_bottom + 20 - hub_top
+    draw.text((width // 2 - hub_w // 2, hub_y), hub, font=hub_font, fill=BRIGHTON_BLACK)
+
+    title_font = find_inter_font(36, bold=True)
+    title = "DAFTAR AGEN FLOOR TIME"
+    title_w, title_h = text_size(draw, title, title_font)
+    title_y = max(130, draw.textbbox((0, hub_y), hub, font=hub_font)[3] + 20)
+    draw.text((width // 2 - title_w // 2, title_y), title, font=title_font, fill=BRIGHTON_BLACK)
+
+    subtitle_font = find_inter_font(20, bold=True)
+    subtitle = f"{MONTH_NAMES_ID[target_month].upper()} {target_year}"
+    subtitle_w, _ = text_size(draw, subtitle, subtitle_font)
+    draw.text(
+        (width // 2 - subtitle_w // 2, draw.textbbox((0, title_y), title, font=title_font)[3] + 10),
+        subtitle,
+        font=subtitle_font,
+        fill=BRIGHTON_BLACK,
+    )
+
+    table_x1 = margin
+    table_x2 = width - margin
+    table_y1 = top_table
+    table_y2 = top_table + header_row_h + rows_h
+    rounded_rect(draw, (table_x1, table_y1, table_x2, table_y2), 12, "#FFFFFF", BORDER_COLOR, 1)
+    draw.rounded_rectangle(
+        (table_x1, table_y1, table_x2, table_y1 + header_row_h + 8),
+        radius=12,
+        fill=BRIGHTON_GOLD_SOFT,
+        outline="#EAD27A",
+        width=1,
+    )
+    draw.rectangle(
+        (table_x1, table_y1 + header_row_h - 8, table_x2, table_y1 + header_row_h + 1),
+        fill=BRIGHTON_GOLD_SOFT,
+    )
+    draw.rectangle((table_x1, table_y1, table_x2, table_y1 + 4), fill=BRIGHTON_GOLD)
+
+    x_positions = [table_x1]
+    x = table_x1
+    for col_width in col_widths:
+        x += col_width
+        x_positions.append(x)
+
+    for index, (column, x1, x2) in enumerate(zip(columns, x_positions[:-1], x_positions[1:])):
+        label_w, label_h = text_size(draw, column, header_font)
+        tx = x2 - 18 - label_w if column == "Total Kehadiran" else x1 + 18
+        draw.text(
+            (tx, table_y1 + (header_row_h - label_h) // 2 - 1),
+            column,
+            font=header_font,
+            fill=BRIGHTON_BLACK,
+        )
+        if index > 0:
+            draw.line((x1, table_y1 + 10, x1, table_y2 - 1), fill="#D7D7D7", width=1)
+
+    y = table_y1 + header_row_h
+    line_h = 31
+    for row_index, (row_h, wrapped_cells) in enumerate(row_layouts):
+        row_fill = "#FFFFFF" if row_index % 2 == 0 else "#F3F3F3"
+        draw.rectangle((table_x1 + 1, y, table_x2 - 1, y + row_h), fill=row_fill)
+        draw.line((table_x1, y, table_x2, y), fill="#E4E4E4", width=1)
+
+        for column, x1, x2, lines in zip(columns, x_positions[:-1], x_positions[1:], wrapped_cells):
+            if column == "Total Kehadiran":
+                value = lines[0]
+                value_w, value_h = text_size(draw, value, body_font)
+                draw.text((x2 - 18 - value_w, y + (row_h - value_h) // 2 - 1), value, font=body_font, fill=BRIGHTON_BLACK)
+                continue
+            text_block_h = len(lines) * line_h
+            text_y = y + max(9, (row_h - text_block_h) // 2)
+            for line in lines:
+                draw.text((x1 + 18, text_y), line, font=body_font, fill=BRIGHTON_BLACK)
+                text_y += line_h
+        y += row_h
+
+    # Informasi jumlah agen dan halaman menggantikan bar dekoratif di footer.
+    footer_y = height - footer_h
+    draw.line((margin, footer_y, width - margin, footer_y), fill="#DADDE2", width=1)
+    footer_font = find_inter_font(18, bold=True)
+    footer_text = f"{total_agent_count} AGEN  •  HALAMAN {page_number}/{total_pages}"
+    footer_text_w, footer_text_h = text_size(draw, footer_text, footer_font)
+    draw.text(
+        (width // 2 - footer_text_w // 2, footer_y + (footer_h - footer_text_h) // 2 - 1),
+        footer_text,
+        font=footer_font,
+        fill=BRIGHTON_BLACK,
+    )
+    return img
+
+
+def render_monthly_agent_roster_images(
+    agents: Sequence[AgentRecord],
+    target_year: int,
+    target_month: int,
+    selected_columns: Sequence[str],
+    sort_mode: str,
+    hub_name: str,
+    logo_text: str,
+) -> List[Image.Image]:
+    """Bagi daftar bulanan menjadi beberapa halaman agar 50 agen tetap terbaca."""
+    columns = [column for column in ROSTER_COLUMN_OPTIONS if column in set(selected_columns)] or ["Nama"]
+    ordered_agents = sort_agents_for_roster(agents, sort_mode)
+    chunks = [
+        ordered_agents[index:index + MONTHLY_ROSTER_PAGE_SIZE]
+        for index in range(0, len(ordered_agents), MONTHLY_ROSTER_PAGE_SIZE)
+    ] or [[]]
+    total_pages = len(chunks)
+    return [
+        _render_monthly_agent_roster_page(
+            page_agents=page_agents,
+            total_agent_count=len(ordered_agents),
+            target_year=target_year,
+            target_month=target_month,
+            columns=columns,
+            hub_name=hub_name,
+            logo_text=logo_text,
+            page_number=page_number,
+            total_pages=total_pages,
+        )
+        for page_number, page_agents in enumerate(chunks, start=1)
+    ]
+
+
 def render_monthly_agent_roster_image(
     agents: Sequence[AgentRecord],
     target_year: int,
@@ -1517,150 +1810,16 @@ def render_monthly_agent_roster_image(
     hub_name: str,
     logo_text: str,
 ) -> Image.Image:
-    """Render daftar agen bulanan dengan visual yang selaras dengan poster Floor Time.
-
-    Semua agen aktif ditampilkan. Font tidak diperkecil berdasarkan jumlah agen;
-    canvas dan tinggi setiap baris bertambah mengikuti konten.
-    """
-    columns = [c for c in ROSTER_COLUMN_OPTIONS if c in set(selected_columns)]
-    if not columns:
-        columns = ["Nama"]
-    ordered_agents = sort_agents_for_roster(agents, sort_mode)
-
-    scale = 1
-    width = 1080
-    margin = 50
-    top_table = 258
-    header_row_h = 48
-    footer_h = 18
-    bottom_pad = 34
-    table_w = width - 2 * margin
-
-    weight_map = {
-        "Nama": 0.32,
-        "Jabatan": 0.28,
-        "Unit": 0.20,
-        "Total Kehadiran": 0.20,
-    }
-    total_weight = sum(weight_map[c] for c in columns)
-    col_widths = [int(table_w * weight_map[c] / total_weight) for c in columns]
-    if col_widths:
-        col_widths[-1] += table_w - sum(col_widths)
-
-    body_font = find_inter_font(14 * scale, bold=False)
-    header_font = find_inter_font(14 * scale, bold=True)
-    dummy = Image.new("RGB", (width, 200), "#FFFFFF")
-    dummy_draw = ImageDraw.Draw(dummy)
-
-    row_layouts: List[Tuple[int, List[List[str]]]] = []
-    for agent in ordered_agents:
-        wrapped_cells: List[List[str]] = []
-        max_lines = 1
-        for col, col_w in zip(columns, col_widths):
-            # Total Kehadiran tidak perlu wrap dan rata kanan saat digambar.
-            lines = [_roster_cell_value(agent, col)] if col == "Total Kehadiran" else _wrap_text_for_width(
-                dummy_draw,
-                _roster_cell_value(agent, col),
-                body_font,
-                max(40, col_w - 24),
-            )
-            wrapped_cells.append(lines)
-            max_lines = max(max_lines, len(lines))
-        row_h = max(44, 18 * max_lines + 18)
-        row_layouts.append((row_h, wrapped_cells))
-
-    rows_h = sum(row_h for row_h, _ in row_layouts)
-    height = max(820, top_table + header_row_h + rows_h + bottom_pad + footer_h)
-    img = Image.new("RGB", (width, height), "#FFFFFF")
-    draw = ImageDraw.Draw(img)
-
-    # Header mengikuti bahasa visual poster mingguan.
-    corner = 110
-    draw.polygon([(0, 0), (corner, 0), (34, 118), (0, 118)], fill=BRIGHTON_YELLOW)
-    draw.polygon([(width, 0), (width - corner, 0), (width - 34, 118), (width, 118)], fill=BRIGHTON_YELLOW)
-    draw.line((72, 16, 20, 90), fill=BRIGHTON_YELLOW, width=2)
-    draw.line((width - 72, 16, width - 20, 90), fill=BRIGHTON_YELLOW, width=2)
-
-    logo_font = find_inter_font(58, bold=True)
-    draw_brighton_logo(draw, width // 2, 22, logo_font, logo_text)
-    hub_font = find_inter_font(16, bold=True)
-    hub = clean_text(hub_name) or DEFAULT_HUB_NAME
-    hub_w, _ = text_size(draw, hub, hub_font)
-    hub_y = 102
-    line_y = hub_y + 9
-    draw.line((width // 2 - 170, line_y, width // 2 - 95, line_y), fill=BRIGHTON_YELLOW, width=2)
-    draw.text((width // 2 - hub_w // 2, hub_y), hub, font=hub_font, fill=BRIGHTON_BLACK)
-    draw.line((width // 2 + 95, line_y, width // 2 + 170, line_y), fill=BRIGHTON_YELLOW, width=2)
-
-    title_font = find_inter_font(39, bold=True)
-    title = f"FLOOR TIME {MONTH_NAMES_ID[target_month].upper()}"
-    tw, th = text_size(draw, title, title_font)
-    title_y = 156
-    draw.text((width // 2 - tw // 2, title_y), title, font=title_font, fill=BRIGHTON_BLACK)
-
-    year_font = find_inter_font(21, bold=True)
-    year_text = str(target_year)
-    yw, yh = text_size(draw, year_text, year_font)
-    draw.text((width // 2 - yw // 2, title_y + th + 14), year_text, font=year_font, fill=TEXT_SECONDARY)
-
-    # Table container + header.
-    table_x1 = margin
-    table_x2 = width - margin
-    table_y1 = top_table
-    table_y2 = top_table + header_row_h + rows_h
-    rounded_rect(draw, (table_x1, table_y1, table_x2, table_y2), 10, "#FFFFFF", BORDER_COLOR, 1)
-    draw.rounded_rectangle((table_x1, table_y1, table_x2, table_y1 + header_row_h + 8), radius=10, fill=BRIGHTON_BLACK)
-    draw.rectangle((table_x1, table_y1 + header_row_h - 8, table_x2, table_y1 + header_row_h + 1), fill=BRIGHTON_BLACK)
-    draw.rectangle((table_x1, table_y1, table_x2, table_y1 + 3), fill=BRIGHTON_YELLOW)
-
-    x_positions = [table_x1]
-    x = table_x1
-    for w in col_widths:
-        x += w
-        x_positions.append(x)
-
-    for idx, (column, x1, x2) in enumerate(zip(columns, x_positions[:-1], x_positions[1:])):
-        label = column
-        if column == "Total Kehadiran":
-            label = "Total Kehadiran"
-        lw, lh = text_size(draw, label, header_font)
-        if column == "Total Kehadiran":
-            tx = x2 - 14 - lw
-        else:
-            tx = x1 + 14
-        draw.text((tx, table_y1 + (header_row_h - lh) // 2 - 1), label, font=header_font, fill="#FFFFFF")
-        if idx > 0:
-            draw.line((x1, table_y1 + 10, x1, table_y2 - 1), fill="#E2E2E2", width=1)
-
-    y = table_y1 + header_row_h
-    line_h = 18
-    for row_index, (row_h, wrapped_cells) in enumerate(row_layouts):
-        row_fill = "#FFFFFF" if row_index % 2 == 0 else "#F1F1F1"
-        draw.rectangle((table_x1 + 1, y, table_x2 - 1, y + row_h), fill=row_fill)
-        draw.line((table_x1, y, table_x2, y), fill="#E7E7E7", width=1)
-
-        for column, x1, x2, lines in zip(columns, x_positions[:-1], x_positions[1:], wrapped_cells):
-            if column == "Total Kehadiran":
-                value = lines[0]
-                vw, vh = text_size(draw, value, body_font)
-                draw.text((x2 - 14 - vw, y + (row_h - vh) // 2 - 1), value, font=body_font, fill=BRIGHTON_BLACK)
-                continue
-            text_block_h = len(lines) * line_h
-            ty = y + max(8, (row_h - text_block_h) // 2)
-            for line in lines:
-                draw.text((x1 + 14, ty), line, font=body_font, fill=BRIGHTON_BLACK)
-                ty += line_h
-        y += row_h
-
-    # Footer accent sama seperti poster mingguan.
-    draw.rectangle((0, height - footer_h, width, height), fill=BRIGHTON_YELLOW)
-    draw.polygon([
-        (int(width * 0.80), height - footer_h),
-        (int(width * 0.86), height - footer_h),
-        (int(width * 0.84), height),
-        (int(width * 0.78), height),
-    ], fill="#151515")
-    return img
+    """Kompatibilitas lama: kembalikan halaman pertama daftar bulanan."""
+    return render_monthly_agent_roster_images(
+        agents,
+        target_year,
+        target_month,
+        selected_columns,
+        sort_mode,
+        hub_name,
+        logo_text,
+    )[0]
 
 
 def build_images_zip(
@@ -1668,14 +1827,17 @@ def build_images_zip(
     weeks: Dict[int, List[date]],
     year: int,
     month: int,
-    monthly_roster_image: Optional[Image.Image] = None,
+    monthly_roster_images: Optional[Sequence[Image.Image]] = None,
 ) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        if monthly_roster_image is not None:
+        for page_number, roster_image in enumerate(monthly_roster_images or [], start=1):
             roster_buffer = io.BytesIO()
-            monthly_roster_image.save(roster_buffer, format="PNG", dpi=(300, 300), compress_level=2)
-            zf.writestr(f"floor_time_{year}-{month:02d}_bulanan.png", roster_buffer.getvalue())
+            roster_image.save(roster_buffer, format="PNG", dpi=(300, 300), compress_level=2)
+            zf.writestr(
+                f"floor_time_{year}-{month:02d}_daftar_agen_halaman_{page_number:02d}.png",
+                roster_buffer.getvalue(),
+            )
         for week_no, img in week_images.items():
             img_buffer = io.BytesIO()
             img.save(img_buffer, format="PNG", dpi=(300, 300), compress_level=2)
@@ -1689,10 +1851,12 @@ def build_images_zip(
     return buffer.getvalue()
 
 
-def build_pdf_from_images(week_images: Dict[int, Image.Image], monthly_roster_image: Optional[Image.Image] = None) -> bytes:
+def build_pdf_from_images(
+    week_images: Dict[int, Image.Image],
+    monthly_roster_images: Optional[Sequence[Image.Image]] = None,
+) -> bytes:
     pages: List[Image.Image] = []
-    if monthly_roster_image is not None:
-        pages.append(monthly_roster_image.convert("RGB"))
+    pages.extend(image.convert("RGB") for image in (monthly_roster_images or []))
     pages.extend(img.convert("RGB") for _, img in sorted(week_images.items()))
     if not pages:
         return b""
@@ -1815,7 +1979,7 @@ def initialize_session_state() -> None:
         "image_zip_bytes": b"",
         "pdf_bytes": b"",
         "week_images": {},
-        "monthly_roster_image": None,
+        "monthly_roster_images": [],
         "weeks": {},
         "slots_by_week": {},
         "holidays": {},
@@ -1842,7 +2006,7 @@ def clear_generated_outputs() -> None:
         "image_zip_bytes": b"",
         "pdf_bytes": b"",
         "week_images": {},
-        "monthly_roster_image": None,
+        "monthly_roster_images": [],
         "slots_by_week": {},
         "holidays": {},
         "generated_target": None,
@@ -1884,8 +2048,9 @@ def main() -> None:
         st.subheader("Kapasitas & Frekuensi")
         weekday_capacity = int(st.number_input("Target agen per shift Senin-Jumat", min_value=1, max_value=30, value=4, step=1))
         saturday_capacity = int(st.number_input("Target agen per shift Sabtu", min_value=1, max_value=30, value=3, step=1))
-        max_weekly_assignments = int(st.radio("Maksimum Floor Time / Agent / Minggu", [1, 2, 3], format_func=lambda x: f"{x}x", horizontal=True))
-        auto_expand_capacity = st.checkbox("Perluas kapasitas bila agen lebih banyak", value=True)
+        max_weekly_assignments = int(st.radio("Target Floor Time / Agen / Minggu", [1, 2, 3], format_func=lambda x: f"{x}x", horizontal=True))
+        auto_expand_capacity = True
+        st.caption("Setiap agen mendapat sesuai target 1x/2x/3x per minggu pada hari berbeda. Kapasitas shift otomatis bertambah jika diperlukan; target dibatasi jumlah hari aktif.")
 
         st.divider()
         # Poster aplikasi ini selalu menggunakan orientasi portrait. Opsi orientasi
@@ -2102,7 +2267,7 @@ Penanganan klien berdasarkan agen yang melakukan absensi pertama."""
                         notes=notes,
                         orientation=output_orientation,
                     )
-                    monthly_roster_image = render_monthly_agent_roster_image(
+                    monthly_roster_images = render_monthly_agent_roster_images(
                         agents=agents,
                         target_year=selected_year,
                         target_month=selected_month,
@@ -2115,8 +2280,17 @@ Penanganan klien berdasarkan agen yang melakukan absensi pertama."""
                         assignments_df, agents, weeks, holidays, slots_by_week, schedule,
                         hub_name, selected_year, selected_month,
                     )
-                    image_zip_bytes = build_images_zip(week_images, weeks, selected_year, selected_month, monthly_roster_image=monthly_roster_image)
-                    pdf_bytes = build_pdf_from_images(week_images, monthly_roster_image=monthly_roster_image)
+                    image_zip_bytes = build_images_zip(
+                        week_images,
+                        weeks,
+                        selected_year,
+                        selected_month,
+                        monthly_roster_images=monthly_roster_images,
+                    )
+                    pdf_bytes = build_pdf_from_images(
+                        week_images,
+                        monthly_roster_images=monthly_roster_images,
+                    )
 
                     st.session_state.update({
                         "assignments_df": assignments_df,
@@ -2129,7 +2303,7 @@ Penanganan klien berdasarkan agen yang melakukan absensi pertama."""
                         "image_zip_bytes": image_zip_bytes,
                         "pdf_bytes": pdf_bytes,
                         "week_images": week_images,
-                        "monthly_roster_image": monthly_roster_image,
+                        "monthly_roster_images": monthly_roster_images,
                         "weeks": weeks,
                         "slots_by_week": slots_by_week,
                         "holidays": holidays,
@@ -2157,6 +2331,9 @@ Penanganan klien berdasarkan agen yang melakukan absensi pertama."""
             c1.metric("Agent Terjadwal", assignments_df["Agent ID"].nunique() if not assignments_df.empty else 0)
             c2.metric("Hari Libur", len(st.session_state.get("holidays", {})))
             c3.metric("Periode Poster", len(weeks_state))
+            for message in st.session_state.get("warnings", []):
+                if "hari aktif" in message or "hari kerja aktif" in message or "dari target" in message:
+                    st.warning(message)
 
             if not st.session_state.get("validation_ok"):
                 for msg in st.session_state.get("validation_messages", []):
@@ -2191,7 +2368,7 @@ Penanganan klien berdasarkan agen yang melakukan absensi pertama."""
             if not selected_roster_columns:
                 st.warning("Pilih minimal satu kolom untuk menampilkan daftar agen.")
             elif roster_agents:
-                roster_image = render_monthly_agent_roster_image(
+                roster_images = render_monthly_agent_roster_images(
                     agents=roster_agents,
                     target_year=roster_year,
                     target_month=roster_month,
@@ -2200,8 +2377,11 @@ Penanganan klien berdasarkan agen yang melakukan absensi pertama."""
                     hub_name=hub_name,
                     logo_text=logo_text,
                 )
-                st.session_state["monthly_roster_image"] = roster_image
-                st.image(roster_image, use_container_width=True)
+                st.session_state["monthly_roster_images"] = roster_images
+                for page_number, roster_image in enumerate(roster_images, start=1):
+                    if len(roster_images) > 1:
+                        st.caption(f"Daftar agen bulanan — halaman {page_number} dari {len(roster_images)}")
+                    st.image(roster_image, use_container_width=True)
 
             st.divider()
             period_numbers = list(weeks_state)
@@ -2225,26 +2405,22 @@ Penanganan klien berdasarkan agen yang melakukan absensi pertama."""
         else:
             target = st.session_state.get("generated_target") or (selected_year, selected_month)
             file_tag = f"{target[0]}-{target[1]:02d}"
-            roster_image = st.session_state.get("monthly_roster_image")
-            if roster_image is not None:
+            roster_images = st.session_state.get("monthly_roster_images", [])
+            if roster_images:
                 dynamic_zip_bytes = build_images_zip(
                     st.session_state.get("week_images", {}),
                     st.session_state.get("weeks", {}),
                     target[0],
                     target[1],
-                    monthly_roster_image=roster_image,
+                    monthly_roster_images=roster_images,
                 )
                 dynamic_pdf_bytes = build_pdf_from_images(
                     st.session_state.get("week_images", {}),
-                    monthly_roster_image=roster_image,
+                    monthly_roster_images=roster_images,
                 )
-                roster_png_buffer = io.BytesIO()
-                roster_image.save(roster_png_buffer, format="PNG", dpi=(300, 300), compress_level=2)
-                roster_png_bytes = roster_png_buffer.getvalue()
             else:
                 dynamic_zip_bytes = st.session_state.get("image_zip_bytes", b"")
                 dynamic_pdf_bytes = st.session_state.get("pdf_bytes", b"")
-                roster_png_bytes = b""
             c1, c2, c3 = st.columns(3)
             with c1:
                 st.download_button("Download Excel", st.session_state.get("excel_bytes", b""), f"floor_time_{file_tag}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
@@ -2263,7 +2439,7 @@ Penanganan klien berdasarkan agen yang melakukan absensi pertama."""
             2. Upload Excel/CSV dengan kolom **Nama, Jabatan, Office, Total**.
             3. Atur **Minimum Total Kehadiran** untuk menentukan agen yang memenuhi syarat.
             4. Hilangkan centang **Masuk Jadwal** jika ada agen yang tidak ingin dijadwalkan pada bulan tersebut.
-            5. Atur tanggal merah, kapasitas shift, dan batas **1x / 2x / 3x per agent per minggu**, lalu Generate Jadwal Bulanan.
+            5. Atur tanggal merah, kapasitas shift, dan target **1x / 2x / 3x per agen per minggu**, lalu Generate Jadwal Bulanan.
             """
         )
         render_credit()
