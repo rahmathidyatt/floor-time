@@ -4,7 +4,10 @@ Aplikasi internal berbasis **Python + Streamlit** untuk menyiapkan data agent bu
 
 ## Pembaruan utama
 
-- Desain poster baru mengikuti gaya Brighton yang lebih clean, formal, dan corporate.
+- Desain poster mengikuti referensi corporate premium: teks hitam kontras tinggi, aksen emas Brighton, hierarki tegas, card dengan shadow halus, serta time band yang bersih.
+- Header poster dibuat lebih rapat, ornamen sudut dihilangkan, dan rentang tanggal tampil tanpa bingkai agar fokus langsung menuju jadwal.
+- Hari Sabtu memakai latar kuning lembut untuk menandai jam operasional khusus. Catatan hanya mengikuti isian pengguna; tidak ada keterangan tambahan otomatis.
+- Font daftar agen tidak diperkecil saat jumlah agen bertambah; card/canvas bertambah tinggi berdasarkan hasil pembungkusan nama dan setiap shift tetap memakai satu kolom nama.
 - Poster **tidak menampilkan Minggu 1/2/3/4/5/6**; hanya rentang tanggal.
 - Icon kalender berulang pada setiap hari dihilangkan.
 - Hari libur memakai aksen merah dan dapat diberi nama, misalnya `Maulid Nabi Muhammad SAW`.
@@ -13,13 +16,16 @@ Aplikasi internal berbasis **Python + Streamlit** untuk menyiapkan data agent bu
 - Tersedia filter **Minimum Total Kehadiran**; default 5 sehingga kehadiran 1–4 tidak masuk kandidat jadwal.
 - Agen yang lolos filter dapat dikeluarkan khusus untuk bulan berjalan dengan menghilangkan centang **Masuk Jadwal**.
 - Bulan referensi otomatis adalah bulan sebelum bulan jadwal, termasuk Desember → Januari.
-- Batas Floor Time per agent per minggu dapat dipilih **1x, 2x, atau 3x**.
+- Target Floor Time setiap agen per minggu dapat dipilih **1x, 2x, atau 3x**.
 - Agent boleh muncul beberapa kali dalam seminggu pada **hari yang berbeda**, tetapi tidak pernah dua kali pada tanggal yang sama.
 - Algoritma mengutamakan pemerataan total assignment, rotasi shift, jarak hari, dan keragaman Business Unit.
-- Bila agent sedikit, sistem dapat mengulang agent sesuai batas mingguan; bila kapasitas tidak cukup, slot tetap tidak dipaksa dengan duplikasi ilegal. Notifikasi kapasitas massal tidak ditampilkan di UI agar tetap clean.
-- Tab **Jadwal** menampilkan daftar bulanan berjudul `FLOOR TIME [BULAN]` sebelum poster mingguan. Kolom **Nama / Jabatan / Unit / Total Kehadiran** dapat dipilih dan Total Kehadiran dapat diurutkan default, terbesar→terkecil, atau terkecil→terbesar.
+- Kapasitas shift otomatis diperluas untuk memenuhi target semua agen. Jika hari aktif kurang dari target, setiap agen dijadwalkan sebanyak hari aktif dan peringatan ditampilkan.
+- Tab **Jadwal** menampilkan daftar bulanan berjudul `DAFTAR AGEN FLOOR TIME` sebelum poster mingguan. Kolom **Nama / Jabatan / Unit / Total Kehadiran** dapat dipilih dan Total Kehadiran dapat diurutkan default, terbesar→terkecil, atau terkecil→terbesar.
+- Daftar bulanan otomatis dibagi maksimal **20 agen per halaman**. Daftar 50 agen menjadi 3 halaman sehingga tulisan tidak dipaksa mengecil dan lebih nyaman dibaca dari ponsel.
+- Informasi **jumlah agen dan nomor halaman** ditempatkan pada footer daftar bulanan; bar kuning dekoratif di bagian bawah dihapus.
 - Poster memakai ukuran font stabil. Jika agent banyak, tinggi card dan canvas bertambah ke bawah.
-- Jika satu shift sangat padat, daftar agent otomatis dapat dibagi menjadi dua kolom tanpa mengecilkan font.
+- Tinggi area catatan mengikuti jumlah dan panjang catatan, sehingga tidak menyisakan ruang kosong berlebihan.
+- Jika satu shift sangat padat, tinggi daftar bertambah tanpa membagi nama ke kolom sempit.
 - Cross-month week didukung, misalnya `31 Agustus 2026 - 05 September 2026`.
 - Export tersedia dalam Excel, ZIP PNG, dan PDF multi-page.
 - Perubahan konfigurasi setelah generate akan menonaktifkan hasil lama agar tidak menampilkan schedule stale.
@@ -43,7 +49,7 @@ http://localhost:8501
 
 ## Perbaikan kompatibilitas tampilan Windows
 
-Versi ini memaksa theme Streamlit **light** melalui `.streamlit/config.toml` agar teks widget tidak lagi berwarna terang di atas background putih. Renderer PNG/PDF juga mencari font scalable secara cross-platform (Segoe UI/Arial/Aptos pada Windows, serta fallback macOS/Linux) sehingga export tidak jatuh ke bitmap font kecil. Tidak ada file font yang dibundel di project.
+Versi ini memaksa theme Streamlit **light** melalui `.streamlit/config.toml` agar teks widget tidak lagi berwarna terang di atas background putih. Renderer PNG/PDF juga mencari font scalable secara cross-platform (Segoe UI/Arial/Aptos pada Windows, serta fallback macOS/Linux) sehingga export tidak jatuh ke bitmap font kecil. Font DejaVu Sans regular dan bold disertakan dalam assets/fonts dan wajib ikut diunggah.
 
 ## Format data agent
 
@@ -71,7 +77,7 @@ Pada tab **Konfigurasi & Generate**:
 2. Isi nama hari libur.
 3. Generate jadwal.
 
-Output hanya menampilkan hari/tanggal dan nama peringatan dengan warna merah. Tidak ada icon X dan tidak ada tulisan besar `TUTUP` atau `KANTOR TUTUP`.
+Output hanya menampilkan hari/tanggal dan nama peringatan; teks tetap hitam dengan latar aksen hari libur agar konsisten dengan standar keterbacaan. Tidak ada icon X dan tidak ada tulisan besar `TUTUP` atau `KANTOR TUTUP`.
 
 ## Aturan scheduling
 
@@ -83,7 +89,7 @@ Output hanya menampilkan hari/tanggal dan nama peringatan dengan warna merah. Ti
   - 08.00–11.30
   - 11.30–15.00
 - Agent tidak boleh muncul dua kali pada tanggal yang sama.
-- Maksimum assignment per agent per minggu mengikuti pilihan 1x/2x/3x.
+- Setiap agen memperoleh tepat 1x/2x/3x per minggu sesuai pilihan, selama jumlah hari aktif mencukupi.
 - Hari libur tidak dihitung sebagai slot aktif.
 - Request khusus tetap tunduk pada aturan tanggal unik dan batas mingguan.
 - Jika seed/kode audit sama dan data serta konfigurasi sama, hasil scheduling konsisten.
@@ -96,38 +102,36 @@ Unit test dapat dijalankan dengan:
 python -m unittest -v test_floor_time.py
 ```
 
-<<<<<<< HEAD
-Atau upload CSV/Excel. Bila memakai CSV/Excel, aplikasi akan mencari kolom bernama `Agen`, `Nama`, atau `Nama Agen`. Jika tidak ada, kolom pertama akan digunakan.
+Test mencakup cross-month, cross-year, import format Excel baru, filter kehadiran dan pengecualian manual, ekstraksi Unit, sorting dan pagination daftar bulanan, catatan sesuai isian pengguna, hari libur, anti-double, agent sedikit dengan repeat pada hari berbeda, insufficient capacity, serta dynamic poster height.
 
-## Aturan Jadwal
+## Revisi keterbacaan 50 agen
 
-- Senin sampai Jumat memiliki shift:
-  - Pagi: 08.00-12.30
-  - Siang: 12.30-17.00
-- Sabtu memiliki shift:
-  - Pagi: 08.00-11.30
-  - Siang: 11.30-15.00
-- Minggu otomatis tidak dijadwalkan.
-- Tanggal merah yang dipilih tidak akan dijadwalkan.
-- Agen tidak boleh double dalam minggu yang sama.
-- Request urgent diprioritaskan, tetapi tetap mengikuti aturan 1 agen hanya 1 jadwal per minggu.
+- Seluruh teks pada poster dan daftar bulanan menggunakan warna hitam agar kontras tinggi.
+- Huruf **o** pada logo Brighton tetap kuning sebagai identitas logo.
+- Ukuran nama agen, jam shift, hari, tanggal, catatan, dan tabel bulanan diperbesar.
+- Ukuran font tidak pernah diturunkan ketika jumlah agen bertambah; tinggi card/canvas bertambah mengikuti isi.
+- Setiap shift tetap memakai satu kolom; tinggi poster mengikuti jumlah agen dengan font tetap 24 px tebal.
+- Hari Sabtu menggunakan latar kuning lembut karena jam operasionalnya berbeda.
+- Daftar agen bulanan memakai font 23 px, baris lega, dan pagination 20 agen per halaman agar mudah dibaca oleh agen senior atau pengguna berkacamata.
 
-## Output
+## Perbaikan keterbacaan terbaru
+- Jarak logo dan nama kantor dihitung dari batas huruf dengan ruang 18 px.
+- Nama agen dan jam mingguan berukuran 24 px; nama menggunakan huruf tebal.
+- Tinggi baris dan poster otomatis mengikuti isi tanpa mengecilkan huruf.
+- Catatan kosong tidak menampilkan kotak CATATAN.
 
-Aplikasi menyediakan 3 output utama:
+## Pembagian merata
+49 agen pada target 2x menghasilkan 98 penugasan per minggu; target 3x menghasilkan 147 penugasan. Request khusus dihitung sebagai bagian dari target. Satu agen tidak mendapat dua shift pada tanggal yang sama.
 
-1. **Excel** untuk arsip dan pengecekan data detail.
-2. **Gambar PNG** dalam bentuk ZIP karena setiap minggu dibuat menjadi poster terpisah.
-3. **PDF** multi-page yang berisi seluruh poster mingguan.
+## Perbaikan font untuk deploy
+Renderer PNG/PDF memakai assets/fonts/DejaVuSans.ttf dan DejaVuSans-Bold.ttf secara langsung, relatif terhadap app.py. Font sistem operasi tidak lagi menentukan hasil. Kedua font beserta LICENSE.txt wajib ikut disalin dan di-push ke GitHub. Jika aset hilang/rusak, aplikasi memberi pesan jelas, bukan diam-diam memakai font tanpa bold. Footer memakai titik tengah dengan font bawaan: `50 AGEN • HALAMAN 2/3`.
 
-## Catatan Operasional
+```powershell
+git add app.py assets/fonts README.md test_floor_time.py
+git commit -m "Fix deployed poster fonts and roster footer"
+git push origin main
+```
+Setelah deploy selesai, generate ulang jadwal untuk membuat gambar baru.
 
-Aktifkan opsi **Gunakan kode audit** bila ingin hasil generate bisa diulang dengan input yang sama. Matikan opsi tersebut bila ingin hasil random berubah setiap kali generate.
-
-Jika ingin mengubah bentuk poster, pilih **Portrait** atau **Landscape** di sidebar sebelum menekan tombol Generate.
-
-
-
-=======
-Test mencakup cross-month, cross-year, import format Excel baru, filter kehadiran dan pengecualian manual, ekstraksi Unit, sorting daftar bulanan, hari libur, anti-double, agent sedikit dengan repeat pada hari berbeda, insufficient capacity, dynamic poster height, dan dynamic monthly roster height.
->>>>>>> 2c63294 (Update latest Floor Time Scheduler)
+## Nama panjang
+Kolom shift dan lebar poster mingguan mengikuti nama lengkap terpanjang, termasuk kode agen, agar tetap satu baris pada ukuran font 24 px. Footer menggunakan titik tengah •.

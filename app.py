@@ -785,14 +785,14 @@ def build_schedule_css() -> str:
         }}
         * {{ box-sizing:border-box; }}
         body {{ margin:0; font-family:Inter,Arial,Helvetica,sans-serif; color:#111111; background:#fff; }}
-        .poster {{ width:100%; max-width:1080px; margin:0 auto 28px; padding:20px 38px 24px; background:#fff; page-break-after:always; }}
+        .poster {{ width:100%; min-width:1080px; width:max-content; margin:0 auto 28px; padding:20px 38px 24px; background:#fff; page-break-after:always; }}
         .brand {{ text-align:center; font-size:58px; font-weight:900; line-height:1.2; letter-spacing:-2px; color:#111111; }}
         .brand .o {{ color:var(--brighton-gold); }}
         .hub {{ text-align:center; font-size:16px; font-weight:800; letter-spacing:5px; margin-top:18px; color:#111111; }}
         .brand-lines {{ display:none; }}
         .title {{ text-align:center; font-size:40px; font-weight:900; margin:17px 0 5px; letter-spacing:.2px; color:#111111; }}
         .range {{ width:max-content; margin:0 auto 22px; padding:0; border:0; font-size:20px; font-weight:800; color:#111111; }}
-        .day-card {{ display:grid; grid-template-columns:25% 37.5% 37.5%; border:1px solid #E4E8EE; border-radius:14px; margin:0 0 12px; overflow:hidden; min-height:156px; background:#fff; box-shadow:0 6px 16px rgba(17,17,17,.08); }}
+        .day-card {{ display:grid; grid-template-columns:245px minmax(max-content,1fr) minmax(max-content,1fr); border:1px solid #E4E8EE; border-radius:14px; margin:0 0 12px; overflow:hidden; min-height:156px; background:#fff; box-shadow:0 6px 16px rgba(17,17,17,.08); }}
         .day-card.saturday {{ background:var(--saturday-bg); border-color:#F0D77A; }}
         .day-meta {{ padding:27px 30px; border-right:1px solid #DCE2EA; }}
         .day-name {{ font-size:32px; font-weight:900; color:#111111; }}
@@ -803,7 +803,7 @@ def build_schedule_css() -> str:
         .time {{ display:flex; gap:12px; align-items:center; font-size:24px; font-weight:700; margin-bottom:10px; padding:5px 10px; background:linear-gradient(90deg,var(--gold-soft),rgba(255,248,229,0)); border-radius:7px; color:#111111; }}
         .clock {{ width:25px; height:25px; border:3px solid var(--brighton-gold); border-radius:50%; display:inline-block; flex:0 0 25px; }}
         .agents {{ margin:0; padding-left:25px; font-size:24px; font-weight:600; line-height:1.42; overflow-wrap:anywhere; color:#111111; }}
-        .agents li {{ margin-bottom:8px; }}
+        .agents li {{ margin-bottom:8px; white-space:nowrap; }}
         .agents li::marker {{ color:var(--brighton-gold); }}
         .special {{ display:none; }}
         .holiday {{ border-color:#ef9a94; background:var(--holiday-bg); grid-template-columns:25% 75%; }}
@@ -1058,77 +1058,22 @@ _FONT_CACHE: Dict[Tuple[int, bool], ImageFont.ImageFont] = {}
 _FONT_SOURCE_CACHE: Dict[bool, str] = {}
 
 
-def _font_candidates(bold: bool) -> List[str]:
-    """Return cross-platform corporate sans-serif font candidates.
-
-    The previous renderer only knew Linux font paths. On Windows that made
-    Pillow fall back to its tiny bitmap font, so exported posters looked as if
-    all text had been shrunk. These candidates intentionally use fonts that are
-    commonly present on Windows/macOS/Linux without bundling any font files.
-    """
-    windows_dir = os.environ.get("WINDIR", r"C:\Windows")
-    local_app_data = os.environ.get("LOCALAPPDATA", "")
-    windows_fonts = os.path.join(windows_dir, "Fonts")
-    user_fonts = os.path.join(local_app_data, "Microsoft", "Windows", "Fonts") if local_app_data else ""
-
-    regular_names = [
-        "Aptos.ttf", "AptosDisplay.ttf", "segoeui.ttf", "arial.ttf",
-        "calibri.ttf", "DejaVuSans.ttf", "LiberationSans-Regular.ttf",
-    ]
-    bold_names = [
-        "Aptos-Bold.ttf", "AptosDisplay-Bold.ttf", "segoeuib.ttf", "arialbd.ttf",
-        "calibrib.ttf", "DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf",
-    ]
-    names = bold_names if bold else regular_names
-
-    candidates: List[str] = []
-    for folder in [windows_fonts, user_fonts]:
-        if folder:
-            candidates.extend(os.path.join(folder, name) for name in names)
-
-    # macOS system fonts
-    candidates.extend([
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/System/Library/Fonts/Supplemental/Helvetica.ttc",
-    ])
-
-    # Linux fonts used by the development/test environment.
-    candidates.extend([
-        "/usr/share/fonts/opentype/inter/Inter-Bold.otf" if bold else "/usr/share/fonts/opentype/inter/Inter-Regular.otf",
-        "/usr/share/fonts/opentype/inter/InterDisplay-Bold.otf" if bold else "/usr/share/fonts/opentype/inter/InterDisplay-Regular.otf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-    ])
-
-    # Pillow/FreeType can often resolve these by filename even when the absolute
-    # path differs, so keep them as a final scalable-font fallback.
-    candidates.extend(names)
-    return candidates
-
-
 def find_inter_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
+    """Gunakan font bawaan proyek yang sama di Windows dan server Linux."""
     key = (size, bold)
     if key in _FONT_CACHE:
         return _FONT_CACHE[key]
-
-    for candidate in _font_candidates(bold):
-        try:
-            font = ImageFont.truetype(candidate, size=size)
-            _FONT_CACHE[key] = font
-            _FONT_SOURCE_CACHE[bold] = candidate
-            return font
-        except (OSError, ValueError):
-            continue
-
-    # Newer Pillow versions support a scalable built-in fallback. Prefer it to
-    # the legacy tiny bitmap font. This branch should rarely be reached on a
-    # normal Windows installation because Segoe UI/Arial are available.
+    filename = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
+    font_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts", filename)
     try:
-        font = ImageFont.load_default(size=size)
-    except TypeError:
-        font = ImageFont.load_default()
+        font = ImageFont.truetype(font_path, size=size)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"Font aplikasi {filename} tidak dapat dibaca. "
+            "Salin dan unggah folder assets/fonts beserta app.py ke GitHub."
+        ) from exc
     _FONT_CACHE[key] = font
-    _FONT_SOURCE_CACHE[bold] = "Pillow built-in fallback"
+    _FONT_SOURCE_CACHE[bold] = font_path
     return font
 
 
@@ -1268,8 +1213,17 @@ def calculate_week_image_metrics(
     dummy = Image.new("RGB", (width, 240 * scale), "#FFFFFF")
     dummy_draw = ImageDraw.Draw(dummy)
     agent_font = find_inter_font(WEEK_AGENT_FONT_SIZE * scale, bold=True)
+    day_col_w = int((width - 2 * margin) * 0.25)
+    # Ukur nama lengkap beserta kode. Lebarkan kedua shift secara seimbang,
+    # sementara lebar kolom hari dan ukuran font tetap.
+    longest_name_w = max(
+        (text_size(dummy_draw, entry.display_name, agent_font)[0]
+         for slot in slots for entry in schedule_for_week.get(slot.key, [])),
+        default=0,
+    )
+    required_shift_w = longest_name_w + 80 * scale
+    width = max(width, 2 * margin + day_col_w + 2 * required_shift_w)
     card_w = width - 2 * margin
-    day_col_w = int(card_w * 0.25)
     shift_col_w = (card_w - day_col_w) // 2
     entries_w = shift_col_w - 60 * scale
 
@@ -1316,6 +1270,7 @@ def calculate_week_image_metrics(
         "note_line_step": note_line_step,
         "note_item_gap": note_item_gap,
         "day_heights": day_heights,
+        "day_col_w": day_col_w,
     }
 
 
@@ -1418,7 +1373,7 @@ def render_week_image(
     card_x1 = margin
     card_x2 = width - margin
     card_w = card_x2 - card_x1
-    day_col_w = int(card_w * 0.25)
+    day_col_w = int(metrics["day_col_w"])
     shift_col_w = (card_w - day_col_w) // 2
 
     day_font = find_inter_font(36 * scale, bold=True)
